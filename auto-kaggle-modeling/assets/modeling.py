@@ -120,19 +120,119 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def _budget_estimate_hours(
-    template_yaml: dict, comp_profile: dict, cv_split: dict, seed_count: int
+    template_yaml: dict,
+    comp_profile: dict,
+    cv_split: dict,
+    seed_count: int,
+    compute_env: dict | None,
+    idea_keys: list[str],
+    train_csv_path: Path,
 ) -> float:
-    """Best-effort wallclock estimate. See references/budget-estimator.md."""
+    """Wallclock estimate per `references/budget-estimator.md`.
+
+    estimate = base_h × n_folds × seed_count × data_size_factor × cost_multiplier
+             × hardware_factor × long_seq_penalty × 1.3 (safety pad)
+    """
     task_type = comp_profile.get("task_type") or "tabular-regression"
-    base_h = float(
-        template_yaml.get("base_hours_per_fold", {}).get(task_type, 1.0)
-    )
+    base_h = float(template_yaml.get("base_hours_per_fold", {}).get(task_type, 1.0))
     n_folds = int(cv_split.get("n_folds", 5))
-    # data_size_factor is rough — caller can refine via attribution.md later.
-    data_size_factor = 1.0  # default; agent overrides if data_stats.md is informative
+
+    # data_size_factor: tabular → rows / 1M, vision → images / 100k, NLP → tokens / 100M.
+    # Without a measured count, fall back to file size as a proxy.
+    data_size_factor = 1.0
+    try:
+        if train_csv_path.exists():
+            if task_type.startswith("tabular"):
+                # Approximate rows by line count for speed (no need to parse).
+                with train_csv_path.open("rb") as f:
+                    n_lines = sum(1 for _ in f)
+                data_size_factor = max(1.0, n_lines / 1_000_000)
+            elif task_type.startswith("image"):
+                # No reliable image count from a CSV alone; use file row count as proxy.
+                with train_csv_path.open("rb") as f:
+                    n_lines = sum(1 for _ in f)
+                data_size_factor = max(1.0, n_lines / 100_000)
+            elif task_type.startswith("nlp"):
+                # Rough: bytes / 4 ≈ tokens, then / 1e8.
+                data_size_factor = max(1.0, train_csv_path.stat().st_size / 4 / 100_000_000)
+    except OSError:
+        data_size_factor = 1.0
+    data_size_factor = min(data_size_factor, 5.0)  # cap per spec
+
+    # cost_multiplier: pick the heaviest cost among the chosen ideas if recorded.
+    # ideas_pool.md is not parsed here — keep as a configurable default. The
+    # agent can pass `cost_multiplier` via config_overrides.budget.cost_multiplier
+    # when planning a known-heavy run.
     cost_multiplier = 1.0
+    if any("ensemble" in k or "stacking" in k for k in idea_keys):
+        cost_multiplier = 0.2  # ensembles are cheap; small fraction of base
+    elif any(":pseudo" in k or "domain-adaptive" in k for k in idea_keys):
+        cost_multiplier = 2.5  # heavy known patterns
+
+    # hardware_factor: from compute_env.
     hardware_factor = 1.0
-    return base_h * n_folds * seed_count * data_size_factor * cost_multiplier * hardware_factor * 1.3
+    if compute_env:
+        env_name = compute_env.get("env")
+        if env_name == "kaggle-notebook":
+            hardware_factor = 0.5
+        elif env_name == "cpu-only" and not task_type.startswith("tabular"):
+            hardware_factor = 2.0
+
+    # long-sequence penalty for NLP.
+    long_seq_penalty = 1.0
+    if task_type.startswith("nlp"):
+        max_len = 512
+        # caller can override via template defaults or config_overrides
+        # (we don't have it explicitly here; conservatively pad if unknown)
+        long_seq_penalty = max(1.0, (max_len / 512) ** 1.6)
+
+    return (
+        base_h
+        * n_folds
+        * seed_count
+        * data_size_factor
+        * cost_multiplier
+        * hardware_factor
+        * long_seq_penalty
+        * 1.3
+    )
+
+
+def _check_external_data_approved(comp_dir: Path) -> tuple[bool, str]:
+    """Rule 10: before training, verify every external dataset referenced by
+    recon has `Approved for use: YES` in `stage1_recon/external_data_candidates.md`.
+
+    Returns `(all_approved, message)`. If the file does not exist (no externals
+    referenced yet), returns `(True, "")`.
+    """
+    path = comp_dir / "stage1_recon" / "external_data_candidates.md"
+    if not path.exists():
+        return True, ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    unapproved: list[str] = []
+    current_section: str | None = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            current_section = s[3:].strip()
+            continue
+        if not current_section:
+            continue
+        # Tolerate `- **Approved for use:** ...` (list-item form, the documented
+        # one) as well as a bare `**Approved for use:** ...` line.
+        s_low = s.lower().lstrip("- ").strip()
+        if s_low.startswith("**approved for use:**"):
+            verdict = s.split(":", 1)[1].strip().split()[0].upper()
+            if verdict != "YES":
+                unapproved.append(current_section)
+    if unapproved:
+        return False, (
+            "external_data_candidates.md has these datasets NOT approved for use: "
+            + ", ".join(unapproved)
+            + ". Stage 2 refuses to train until the user reviews them. Set "
+            "`Approved for use: YES` next to each entry to allow."
+        )
+    return True, ""
 
 
 def _is_run_already_complete(run_dir: Path) -> bool:
@@ -185,6 +285,23 @@ def setup_and_train(
         (template_src / "template.yaml").read_text()
     ) if (template_src / "template.yaml").exists() else {}
 
+    # Load compute_env for budget + capability checks.
+    compute_env: dict | None = None
+    ce_path = comp_dir / "stage0_bootstrap" / "compute_env.yaml"
+    if ce_path.exists():
+        compute_env = yaml.safe_load(ce_path.read_text())
+
+    # Rule 10 gate — refuse to train if recon listed external datasets the user
+    # has not yet approved. Cheap check, runs before we copy files.
+    ok, msg = _check_external_data_approved(comp_dir)
+    if not ok:
+        sys.stderr.write(f"ESCALATE rule 10: {msg}\n")
+        _append_progress(
+            progress_log,
+            {"stage": "stage2", "event": "external_data_block", "run_id": run_id, "reason": msg[:200]},
+        )
+        return 3
+
     write_heartbeat(comp_dir, "stage2", f"setup_run {run_id}")
 
     # Idempotency — if the run is already complete, just touch the leaderboard.
@@ -210,6 +327,13 @@ def setup_and_train(
                 shutil.copy2(src, dst)
     template_hash = _hash_dir(template_src)
 
+    # Copy the shared CV/metric helper next to train.py so the template's
+    # `from _cv_common import ...` works at runtime. This sidesteps the prior
+    # broken `from ../tabular-lgbm/train` import chain.
+    cv_common_src = HERE / "templates" / "_cv_common.py"
+    if cv_common_src.exists():
+        shutil.copy2(cv_common_src, run_dir / "_cv_common.py")
+
     # Build config.yaml from template defaults + overrides.
     base_cfg = template_yaml.get("defaults", {})
     merged = _deep_merge(
@@ -224,10 +348,15 @@ def setup_and_train(
             "metric": comp_profile.get("metric"),
             "cv_split": cv_split,
             "idea_keys": idea_keys,
+            # Critical: write ABSOLUTE paths. The training subprocess runs with
+            # cwd=run_dir, so any relative path would resolve under that dir
+            # (which is wrong — data lives at runs/<comp_slug>/data/raw/).
             "data_paths": {
-                "train": str(comp_dir / "data" / "raw" / "train.csv"),
-                "test": str(comp_dir / "data" / "raw" / "test.csv"),
-                "sample_submission": str(comp_dir / "data" / "raw" / "sample_submission.csv"),
+                "train": str((comp_dir / "data" / "raw" / "train.csv").resolve()),
+                "test": str((comp_dir / "data" / "raw" / "test.csv").resolve()),
+                "sample_submission": str(
+                    (comp_dir / "data" / "raw" / "sample_submission.csv").resolve()
+                ),
             },
             "submission_format": comp_profile.get("submission", {}),
         },
@@ -238,14 +367,19 @@ def setup_and_train(
 
     # Budget gate.
     seed_count = len(merged.get("seeds", [42]))
-    estimate_h = _budget_estimate_hours(template_yaml, comp_profile, cv_split, seed_count)
+    estimate_h = _budget_estimate_hours(
+        template_yaml,
+        comp_profile,
+        cv_split,
+        seed_count,
+        compute_env,
+        idea_keys,
+        (comp_dir / "data" / "raw" / "train.csv").resolve(),
+    )
     if budget_hours is None:
-        # Try compute_env.yaml.
-        ce_path = comp_dir / "stage0_bootstrap" / "compute_env.yaml"
-        if ce_path.exists():
-            ce = yaml.safe_load(ce_path.read_text()) or {}
+        if compute_env:
             budget_hours = float(
-                ce.get("constraints", {}).get("max_wallclock_per_run_hours", 24)
+                (compute_env.get("constraints") or {}).get("max_wallclock_per_run_hours", 24)
             )
         else:
             budget_hours = 24.0
@@ -321,26 +455,31 @@ def setup_and_train(
         print(f"dry-run OK: run {run_id} set up, would train for ~{estimate_h:.2f}h")
         return 0
 
-    # Invoke training subprocess.
+    # Invoke training subprocess. cwd=run_dir so the template can `from
+    # _cv_common import ...` (sibling file we just copied). Pass absolute
+    # paths for --run-dir and --progress-log so the template never has to
+    # resolve them against an unstable cwd.
     train_py = run_dir / "train.py"
     if not train_py.exists():
         sys.stderr.write(f"template missing train.py: {train_py}\n")
         return 2
+    run_dir_abs = run_dir.resolve()
+    progress_log_abs = progress_log.resolve()
     cmd = [
         sys.executable,
-        str(train_py),
+        "train.py",                       # basename, since cwd=run_dir
         "--config",
         "config.yaml",
         "--run-dir",
-        str(run_dir),
+        str(run_dir_abs),
         "--progress-log",
-        str(progress_log),
+        str(progress_log_abs),
     ]
     log_path = run_dir / "train.log"
     write_heartbeat(comp_dir, "stage2", f"training {run_id}")
     with log_path.open("ab") as logf:
         logf.write(f"\n--- training started {_now_iso()} ---\n".encode())
-        proc = subprocess.run(cmd, cwd=run_dir, stdout=logf, stderr=subprocess.STDOUT)
+        proc = subprocess.run(cmd, cwd=run_dir_abs, stdout=logf, stderr=subprocess.STDOUT)
         logf.write(f"\n--- training exit {proc.returncode} {_now_iso()} ---\n".encode())
 
     if proc.returncode != 0:
@@ -382,12 +521,64 @@ def setup_and_train(
             "cv_std": cv.get("std", 0),
         },
     )
+
+    _write_stage2_handoff(
+        stage_dir=stage_dir,
+        run_id=run_id,
+        cv=cv,
+        leaderboard_path=leaderboard_path,
+        comp_profile=comp_profile,
+        compute_env=compute_env,
+        idea_keys=idea_keys,
+        attribution_cite=attribution_cite,
+    )
+
     write_heartbeat(comp_dir, "stage2", f"done {run_id}")
     print(
         f"run {run_id} done: {cv['metric']} = {cv['mean']:.6f} "
         f"(std {cv.get('std', 0):.6f})"
     )
     return 0
+
+
+def _write_stage2_handoff(
+    *,
+    stage_dir: Path,
+    run_id: str,
+    cv: dict,
+    leaderboard_path: Path,
+    comp_profile: dict,
+    compute_env: dict | None,
+    idea_keys: list[str],
+    attribution_cite: list[str],
+) -> None:
+    """Stage 2 → Stage 3 hand-off (`SKILL.md` step 7)."""
+    from leaderboard import best_by_cv, load  # noqa: PLC0415
+
+    metric_name = cv.get("metric", "metric")
+    direction = (comp_profile.get("metric") or {}).get("direction", "maximize")
+    rows = load(leaderboard_path)
+    n_runs = len([r for r in rows if r.get("status") == "completed"])
+    best = best_by_cv(leaderboard_path, direction=("max" if direction == "maximize" else "min"))
+    best_score = best.get("cv_score") if best else "n/a"
+    best_run = best.get("run_id") if best else "n/a"
+
+    body = (
+        f"# Stage 2 → Stage 3 hand-off (run {run_id} finished)\n\n"
+        f"## What I did\n"
+        f"- Trained `{run_id}` with idea_keys={idea_keys}.\n"
+        f"- CV {metric_name} = {cv['mean']:.6f} (std {cv.get('std', 0):.6f}).\n"
+        f"- Attribution kernels: {', '.join(attribution_cite) if attribution_cite else 'none (+own)'}\n\n"
+        f"## What's true now\n"
+        f"- Total completed runs: {n_runs}.\n"
+        f"- Best CV by trust filter: {best_score} (run `{best_run}`).\n"
+        f"- Compute env: `{(compute_env or {}).get('env', 'unknown')}`.\n\n"
+        f"## What you should do next\n"
+        f"Stage 3: refresh `recommendations.md` ranking by trust-adjusted CV. If "
+        f"`{run_id}` beats the current best by more than 1× cv_std, it should appear "
+        f"near the top. Verify quota with `kaggle competitions submissions` before submitting.\n"
+    )
+    _atomic_write(stage_dir / "hand_off.md", body)
 
 
 def main() -> int:

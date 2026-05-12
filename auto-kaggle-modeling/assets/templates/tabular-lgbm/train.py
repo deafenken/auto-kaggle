@@ -63,70 +63,21 @@ def _atomic_save_csv(path: Path, df: pd.DataFrame) -> None:
     os.replace(tmp, path)
 
 
-def _split_iter(cfg: dict[str, Any], df: pd.DataFrame, y: np.ndarray):
-    """Generate (fold_idx, train_idx, val_idx) tuples per cv_split.yaml."""
-    from sklearn.model_selection import (  # noqa: PLC0415
-        GroupKFold,
-        KFold,
-        StratifiedKFold,
-    )
-
-    cv = cfg["cv_split"]
-    scheme = cv["scheme"]
-    n_folds = int(cv["n_folds"])
-    seed = cv.get("seed")
-    if scheme == "StratifiedKFold":
-        sk = StratifiedKFold(
-            n_splits=n_folds, shuffle=bool(cv.get("shuffle", True)), random_state=seed
-        )
-        for i, (tr, va) in enumerate(sk.split(df, y)):
-            yield i, tr, va
-    elif scheme == "KFold":
-        kf = KFold(
-            n_splits=n_folds, shuffle=bool(cv.get("shuffle", True)), random_state=seed
-        )
-        for i, (tr, va) in enumerate(kf.split(df)):
-            yield i, tr, va
-    elif scheme == "GroupKFold":
-        gk = GroupKFold(n_splits=n_folds)
-        for i, (tr, va) in enumerate(gk.split(df, y, groups=df[cv["group_col"]])):
-            yield i, tr, va
-    else:
-        raise ValueError(
-            f"unsupported CV scheme '{scheme}' for this template — write a custom "
-            "train.py or extend train.py."
-        )
+def _select_fold(cfg, train, y, target_fold_idx):
+    """Yield only the indices for `target_fold_idx`. Used by the resume path
+    to recover val_idx without retraining."""
+    for fold_idx, tr_idx, va_idx in _split_iter(cfg, train, y):
+        if fold_idx == target_fold_idx:
+            yield fold_idx, tr_idx, va_idx
+            return
 
 
-def _compute_metric(metric_name: str, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    from sklearn.metrics import (  # noqa: PLC0415
-        accuracy_score,
-        f1_score,
-        log_loss,
-        mean_absolute_error,
-        mean_squared_error,
-        roc_auc_score,
-    )
-
-    m = metric_name.lower()
-    if m == "rmse":
-        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    if m == "rmsle":
-        # Predictions must be non-negative for log1p; clip to be safe.
-        p = np.clip(y_pred, 0, None)
-        return float(np.sqrt(mean_squared_error(np.log1p(y_true), np.log1p(p))))
-    if m == "mae":
-        return float(mean_absolute_error(y_true, y_pred))
-    if m == "auc":
-        return float(roc_auc_score(y_true, y_pred))
-    if m == "log_loss":
-        return float(log_loss(y_true, y_pred))
-    if m == "accuracy":
-        return float(accuracy_score(y_true, (y_pred > 0.5).astype(int)))
-    if m == "f1":
-        return float(f1_score(y_true, (y_pred > 0.5).astype(int)))
-    # Fallback — RMSE
-    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+# Shared CV + metric helpers live in `_cv_common.py`, copied next to this file
+# by `modeling.py` at run-setup time. Importing them locally keeps every
+# template using the same dispatch logic (no drift, no broken cross-template
+# imports).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _cv_common import _compute_metric, _split_iter  # noqa: E402
 
 
 def _apply_target_transform(y: np.ndarray, transform: str | None) -> tuple[np.ndarray, callable]:
@@ -165,6 +116,22 @@ def main() -> int:
 
     y_raw = train[target_col].to_numpy()
     y, inverse = _apply_target_transform(y_raw, fc.get("target_transform"))
+
+    # Multiclass: LightGBM requires integer class labels in [0, n_classes). If
+    # the dataset ships string or non-contiguous integer labels, label-encode
+    # here and keep the inverse mapping so the submission can emit class names.
+    task_type_early = cfg.get("task_type", "tabular-regression")
+    class_labels: list = []
+    if task_type_early == "tabular-multiclass":
+        # Use stable order: sorted unique values of y_raw.
+        unique = sorted({v.item() if hasattr(v, "item") else v for v in y_raw})
+        class_labels = list(unique)
+        label_to_int = {v: i for i, v in enumerate(class_labels)}
+        y_raw_int = np.array([label_to_int[v.item() if hasattr(v, "item") else v] for v in y_raw], dtype=np.int64)
+        y_int_for_train = y_raw_int  # we won't apply target_transform on multiclass labels
+        y = y_raw_int.astype(np.float64)
+    else:
+        y_raw_int = None  # not used
 
     feature_cols = [
         c for c in train.columns if c not in drop_cols and c != target_col and c != id_col
@@ -210,7 +177,9 @@ def main() -> int:
     n_train = len(train)
     n_test = len(test)
     if task_type == "tabular-multiclass":
-        n_classes = len(np.unique(y_raw))
+        n_classes = len(class_labels) if class_labels else int(np.unique(y_raw).size)
+        # LightGBM multiclass requires num_class set.
+        lgb_params["num_class"] = n_classes
         oof_acc = np.zeros((n_train, n_classes), dtype=np.float64)
         test_acc = np.zeros((n_test, n_classes), dtype=np.float64)
     else:
@@ -296,7 +265,10 @@ def main() -> int:
             cfg_hash_path.write_text(cfg_hash)
 
             fold_score = _compute_metric(metric_name, y_raw[va_idx], pred_va_orig)
-            per_fold_scores.append(fold_score)
+            # Persist the per-fold score in a sidecar JSON so a resumed run can
+            # recover scores for skipped folds without retraining.
+            score_path = folds_dir / f"score_seed{seed}_fold{fold_idx}.json"
+            score_path.write_text(json.dumps({"score": fold_score, "metric": metric_name}))
             took = time.time() - t0
             _append_progress(
                 progress_log,
@@ -333,6 +305,32 @@ def main() -> int:
             ts = np.load(folds_dir / f"test_seed{seed}_fold{fold_idx}.npy")
             oof_full[va_idx] += sl / seeds_count
             test_full += ts / (n_folds * seeds_count)
+
+    # Reload per-fold scores from the sidecar JSONs (covers folds that were
+    # *skipped* on this run because they were complete from a prior crash).
+    per_fold_scores = []
+    for seed in seeds:
+        for fold_idx in range(n_folds):
+            sp = folds_dir / f"score_seed{seed}_fold{fold_idx}.json"
+            if sp.exists():
+                try:
+                    per_fold_scores.append(float(json.loads(sp.read_text())["score"]))
+                    continue
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
+            # Fallback: recompute from saved OOF slice. This happens when an
+            # older run wrote OOFs but no sidecar score, or when sidecar was
+            # corrupted.
+            try:
+                _, _, va_idx_local = next(
+                    iter(_select_fold(cfg, train, y_raw, fold_idx))
+                )
+                sl = np.load(folds_dir / f"oof_seed{seed}_fold{fold_idx}.npy")
+                per_fold_scores.append(
+                    _compute_metric(metric_name, y_raw[va_idx_local], sl)
+                )
+            except StopIteration:
+                pass
 
     _atomic_save_npy(run_dir / "oof.npy", oof_full)
 

@@ -45,6 +45,18 @@ def _atomic_write_yaml(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _append_progress(progress_log: Path, event: dict[str, Any]) -> None:
+    """Append-only progress event. Mirrors the helper used by every other stage
+    so resume-by-default works without a shared utils module."""
+    import json as _json  # local: keep top-level imports minimal
+    from datetime import datetime as _dt, timezone as _tz
+
+    progress_log.parent.mkdir(parents=True, exist_ok=True)
+    event = {"ts_utc": _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **event}
+    with progress_log.open("a") as f:
+        f.write(_json.dumps(event) + "\n")
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -99,7 +111,29 @@ def detect_task_type_from_submission(sample_submission_path: Path) -> str | None
 
 
 def is_bootstrap_done(stage_dir: Path) -> bool:
-    return (stage_dir / "comp_profile.yaml").exists() and (stage_dir / "hand_off.md").exists()
+    """A bootstrap is "done" only after the agent has finalized it.
+
+    bootstrap.py writes a *partial* profile (it cannot WebFetch the rules page
+    itself; the agent does Step 7 of the SKILL.md workflow). We refuse to skip
+    until all of:
+      - comp_profile.yaml exists AND `bootstrap_partial: false`
+      - rules_summary.md exists
+      - compute_env.yaml exists
+    """
+    cp_path = stage_dir / "comp_profile.yaml"
+    if not cp_path.exists():
+        return False
+    if not (stage_dir / "rules_summary.md").exists():
+        return False
+    if not (stage_dir / "compute_env.yaml").exists():
+        return False
+    try:
+        cp = yaml.safe_load(cp_path.read_text()) or {}
+    except yaml.YAMLError:
+        return False
+    if cp.get("bootstrap_partial") is True:
+        return False
+    return True
 
 
 def bootstrap(comp_slug: str, runs_dir: Path) -> int:
@@ -142,7 +176,9 @@ def bootstrap(comp_slug: str, runs_dir: Path) -> int:
         sys.stderr.write(f"ESCALATE: kaggle auth failed: {e}\n")
         return 3
 
-    raw_view_path = stage_dir / "raw_comp_view.json"
+    # `kaggle competitions view` output is a `Key: Value` text block, not JSON.
+    # Name accordingly so a future reader doesn't expect JSON.
+    raw_view_path = stage_dir / "raw_comp_view.txt"
     _atomic_write_text(raw_view_path, raw_view)
 
     parsed_view = parse_competition_view(raw_view)
@@ -222,6 +258,16 @@ def bootstrap(comp_slug: str, runs_dir: Path) -> int:
         ),
     }
     _atomic_write_yaml(stage_dir / "comp_profile.yaml", comp_profile)
+    _append_progress(
+        progress_log,
+        {
+            "stage": "stage0",
+            "event": "comp_profile_written",
+            "task_type": task_type,
+            "deadline_utc": parsed_view.get("deadline"),
+            "partial": True,
+        },
+    )
 
     # Quick data stats placeholder — agent fills the full file
     stats_lines = [f"# Data stats — {comp_slug}\n\n"]
@@ -251,6 +297,15 @@ def bootstrap(comp_slug: str, runs_dir: Path) -> int:
         f"`bootstrap_partial: false`, and rewrite this hand_off in final form.\n"
     )
     _atomic_write_text(stage_dir / "hand_off.md", handoff)
+
+    _append_progress(
+        progress_log,
+        {
+            "stage": "stage0",
+            "event": "bootstrap_script_done",
+            "note": "partial profile written; agent must complete rules parsing + compute_env",
+        },
+    )
 
     write_heartbeat(run_dir, "stage0", "done_pending_agent_finalize")
     print("bootstrap.py done — partial profile written, agent must finalize")

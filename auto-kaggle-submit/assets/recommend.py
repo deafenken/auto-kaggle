@@ -57,6 +57,13 @@ def _trust_adjusted(cv: float, std: float, direction: str, alpha: float) -> floa
     return cv + alpha * std
 
 
+def _coerce_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _last_public_lb_for_run(run_id: str, submissions: list[dict]) -> Optional[float]:
     for entry in reversed(submissions):
         if entry.get("run_id") == run_id and entry.get("public_lb") is not None:
@@ -132,6 +139,34 @@ def calibration_health(submissions: list[dict], default_alpha: float = 1.0) -> s
     return "healthy"
 
 
+def _has_submittable_attribution(run_dir: Path, run_id: str) -> bool:
+    """Pre-submit gate (Rule 2): would this run be allowed to submit?
+
+    Mirrors `submit.py`'s check so recommendations don't surface candidates
+    that would be blocked at submit time.
+    """
+    attr_path = run_dir / "stage2_modeling" / "runs" / run_id / "attribution.md"
+    if not attr_path.exists():
+        return False
+    text = attr_path.read_text(encoding="utf-8", errors="ignore")
+    # Match the attribution token Stage 3 will require in the submit message.
+    import re as _re
+
+    if _re.search(r"attr:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", text):
+        return True
+    # Or a populated Citations section (one line per ref, parsed via _read_attribution_keys).
+    if _read_attribution_keys(attr_path):
+        return True
+    # Or an explicit +own marker with a non-None Own additions section.
+    if "+ own" in text or "+own" in text:
+        return True
+    if "## Own additions" in text:
+        own_block = text.split("## Own additions", 1)[1].split("##", 1)[0].lower()
+        if own_block.strip() and "none" not in own_block:
+            return True
+    return False
+
+
 def build_recommendations(
     run_dir: Path,
     leaderboard: list[dict],
@@ -155,27 +190,41 @@ def build_recommendations(
             std = float(r.get("cv_std") or 0)
         except ValueError:
             continue
+        # Eligibility — would submit.py accept this run? If not, drop it
+        # entirely from the recommendation list (it can never be the chosen
+        # candidate, so showing it as a top slot would mislead the user).
+        cand_preds = run_dir / "stage2_modeling" / "runs" / r["run_id"] / "test_preds.csv"
+        if not cand_preds.exists():
+            continue
+        if not _has_submittable_attribution(run_dir, r["run_id"]):
+            continue
         r2 = dict(r)
         r2["_cv"] = cv
         r2["_std"] = std
         r2["_trust"] = _trust_adjusted(cv, std, metric_direction, alpha)
         r2["_untrustworthy"] = (std > 0.5 * abs(cv)) if cv != 0 else False
-        r2["_public_lb"] = _last_public_lb_for_run(r["run_id"], submissions)
+        # Prefer leaderboard's public_lb (recorded by Stage 3 after a successful
+        # poll) and fall back to the submission log if the leaderboard cell is
+        # missing. The leaderboard is the durable record; the log is the audit
+        # trail. This ordering avoids losing LB data after log parse issues.
+        r2["_public_lb"] = (
+            _coerce_float(r.get("public_lb"))
+            if r.get("public_lb") not in (None, "")
+            else _last_public_lb_for_run(r["run_id"], submissions)
+        )
         # Near-duplicate check
-        cand_preds = run_dir / "stage2_modeling" / "runs" / r["run_id"] / "test_preds.csv"
         r2["_near_dup_of"] = None
-        if cand_preds.exists():
-            for s in submissions:
-                prior = Path(s.get("file") or "")
-                if not prior.exists():
-                    continue
-                try:
-                    d = mae(load_predictions(cand_preds), load_predictions(prior))
-                    if d < 1e-6:
-                        r2["_near_dup_of"] = s.get("run_id")
-                        break
-                except Exception:  # noqa: BLE001
-                    continue
+        for s in submissions:
+            prior = Path(s.get("file") or "")
+            if not prior.exists():
+                continue
+            try:
+                d = mae(load_predictions(cand_preds), load_predictions(prior))
+                if d < 1e-6:
+                    r2["_near_dup_of"] = s.get("run_id")
+                    break
+            except Exception:  # noqa: BLE001
+                continue
         # Attribution count for tiebreaks / display
         attr_path = run_dir / "stage2_modeling" / "runs" / r["run_id"] / "attribution.md"
         r2["_attr_keys"] = _read_attribution_keys(attr_path)
@@ -291,6 +340,157 @@ def write_recommendations(run_dir: Path, text: str) -> Path:
     tmp.write_text(text)
     tmp.replace(out_path)
     return out_path
+
+
+def build_final_selection(
+    run_dir: Path,
+    leaderboard: list[dict],
+    submissions: list[dict],
+    metric_direction: str,
+    metric_name: str,
+    deadline_utc: Optional[str],
+    alpha: float,
+    beta: float = 0.5,
+) -> str:
+    """Deadline-mode artifact: proposes a SAFE + AMBITIOUS pair for the user.
+
+    Both picks are user-gated (`--final-submission-confirm`). Logic follows
+    `auto-kaggle-submit/references/final-selection.md`:
+
+      Slot 1 (SAFE):       smallest cv_std among top 5 by trust-adjusted CV,
+                           with cv_score within 1 std of the pool best.
+      Slot 2 (AMBITIOUS):  among top 10, max(trust_adjusted - β × pairwise_corr
+                           with slot1), excluding candidates whose corr with
+                           slot1 is > 0.99.
+    """
+    # Build the same ranked pool as build_recommendations.
+    completed = [
+        r for r in leaderboard
+        if r.get("status") == "completed" and r.get("cv_score") not in (None, "")
+    ]
+    pool: list[dict] = []
+    for r in completed:
+        try:
+            cv = float(r["cv_score"])
+            std = float(r.get("cv_std") or 0)
+        except ValueError:
+            continue
+        if not _has_submittable_attribution(run_dir, r["run_id"]):
+            continue
+        cand_preds = run_dir / "stage2_modeling" / "runs" / r["run_id"] / "test_preds.csv"
+        if not cand_preds.exists():
+            continue
+        pool.append({
+            "row": r,
+            "cv": cv,
+            "std": std,
+            "trust": _trust_adjusted(cv, std, metric_direction, alpha),
+            "preds_path": cand_preds,
+        })
+    if not pool:
+        return (
+            f"# Final selection — (no eligible candidates)\n\n"
+            f"_Deadline: {deadline_utc}_\n\n"
+            "No completed runs pass the trust + attribution filter. You must run "
+            "at least one more training run before deadline, or relax `trust_alpha`.\n"
+        )
+
+    # Sort by trust_adjusted (preferred direction).
+    reverse = metric_direction == "maximize"
+    pool.sort(key=lambda x: x["trust"], reverse=reverse)
+    top5 = pool[:5]
+    pool_best = top5[0]
+    within_1std = [p for p in top5 if abs(p["cv"] - pool_best["cv"]) <= max(pool_best["std"], 1e-9)]
+    slot1 = min(within_1std, key=lambda x: x["std"]) if within_1std else top5[0]
+
+    # AMBITIOUS pick: highest trust_adjusted - β * corr_with_slot1, excluding slot1
+    # and exclude near-clones of slot1 (corr > 0.99).
+    slot1_preds = load_predictions(slot1["preds_path"])
+    top10 = pool[: max(10, len(pool))][:10]
+    candidates: list[dict] = []
+    for c in top10:
+        if c["row"]["run_id"] == slot1["row"]["run_id"]:
+            continue
+        try:
+            p = load_predictions(c["preds_path"])
+            if p.shape != slot1_preds.shape:
+                corr = 0.0
+            else:
+                corr = float(np.corrcoef(p, slot1_preds)[0, 1])
+        except Exception:  # noqa: BLE001
+            corr = 0.0
+        if corr > 0.99:
+            continue
+        score = c["trust"] - beta * corr if reverse else -c["trust"] - beta * corr
+        candidates.append({**c, "_corr": corr, "_score": score})
+    slot2 = max(candidates, key=lambda x: x["_score"]) if candidates else None
+
+    def _block(label: str, p: dict | None, extras: str = "") -> list[str]:
+        if p is None:
+            return [
+                f"## {label} — (none found)",
+                "",
+                "No diverse candidate available; consider running an ensemble or a "
+                "different-seed variant of slot 1.",
+                "",
+            ]
+        r = p["row"]
+        pub_lb = (
+            _coerce_float(r.get("public_lb"))
+            if r.get("public_lb") not in (None, "")
+            else _last_public_lb_for_run(r["run_id"], submissions)
+        )
+        gap_text = f"{abs(pub_lb - p['cv']):.4f}" if pub_lb is not None else "n/a"
+        attr_keys = _read_attribution_keys(
+            run_dir / "stage2_modeling" / "runs" / r["run_id"] / "attribution.md"
+        )
+        return [
+            f"## Slot {'1 — SAFE' if label == 'SAFE' else '2 — AMBITIOUS'} — `{r['run_id']}`",
+            "",
+            f"- **CV ({metric_name}):** {p['cv']:.6f} (std {p['std']:.6f})",
+            f"- **Trust-adjusted:** {p['trust']:.6f}",
+            f"- **Public LB:** {pub_lb if pub_lb is None else f'{pub_lb:.6f}'} · gap {gap_text}",
+            f"- **Ideas:** {r.get('idea_keys') or '(none recorded)'}",
+            f"- **Attribution:** {', '.join(attr_keys) if attr_keys else '+own'}",
+            extras,
+            "",
+        ]
+
+    safe_block = _block("SAFE", slot1)
+    ambitious_extras = ""
+    if slot2 is not None:
+        ambitious_extras = (
+            f"- **Disagreement with slot 1 (Pearson):** {slot2['_corr']:.3f}"
+        )
+    ambitious_block = _block("AMBITIOUS", slot2, ambitious_extras)
+
+    body = (
+        [f"# Final selection — refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+         "",
+         f"_Deadline: {deadline_utc}._",
+         "",
+         "_Both final submissions are **user-gated**. The skill ranks; you decide. "
+         "After confirming, you must ALSO go to the Kaggle website and click "
+         "'Select for Final' next to each of these submissions — that step has no API._",
+         ""]
+        + safe_block
+        + ambitious_block
+        + [
+            "## How to confirm",
+            "",
+            "When you've reviewed both slots, run:",
+            "",
+            "```",
+            f"auto-kaggle-submit <slug> --submit <slot1 run_id> --final-submission-confirm",
+            f"auto-kaggle-submit <slug> --submit <slot2 run_id> --final-submission-confirm",
+            "```",
+            "",
+            "Then go to https://www.kaggle.com/competitions/<slug>/submissions and",
+            "click **Select for Final** on each of those two submissions.",
+            "",
+        ]
+    )
+    return "\n".join(body)
 
 
 def main() -> int:

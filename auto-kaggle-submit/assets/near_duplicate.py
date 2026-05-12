@@ -23,23 +23,58 @@ import numpy as np
 import pandas as pd
 
 
-def load_predictions(csv_path: Path, id_col: Optional[str] = None) -> np.ndarray:
+def load_predictions(
+    csv_path: Path,
+    id_col: Optional[str] = None,
+    prediction_cols: Optional[list[str]] = None,
+) -> np.ndarray:
     """Load a submission CSV as a flat float array (id-aligned, id col dropped).
 
-    The id column is auto-detected if not provided (first column, case-insensitive
-    match on "id" / "image_id" / "sample_id" / "series_id" / first column).
+    - `id_col`: the column to sort by (so rows align across files). Auto-detected
+      from common names if not supplied.
+    - `prediction_cols`: numeric columns to compare on. If supplied, only these
+      are loaded as floats. If None, all non-id columns are tried; non-numeric
+      ones (event labels, RLE strings, prediction strings) are encoded by their
+      hash mod 2^53 so a near-duplicate check still works on string-valued
+      submissions without crashing.
+
+    Call sites that have a `comp_profile.submission.columns` list SHOULD pass
+    `prediction_cols` explicitly — that way the comparison is exact and
+    detection of LB probing remains tight.
     """
     df = pd.read_csv(csv_path)
     if id_col is None:
-        for cand in ("id", "image_id", "sample_id", "series_id"):
+        for cand in ("id", "image_id", "sample_id", "series_id", "Id", "ImageId"):
             if cand in df.columns:
                 id_col = cand
                 break
         if id_col is None:
             id_col = df.columns[0]
     df = df.sort_values(id_col).reset_index(drop=True)
-    val_cols = [c for c in df.columns if c != id_col]
-    arr = df[val_cols].to_numpy(dtype=np.float64).ravel()
+
+    cols = prediction_cols if prediction_cols else [c for c in df.columns if c != id_col]
+    cols = [c for c in cols if c in df.columns]
+    if not cols:
+        # Nothing to compare on — pretend single 0 value per row.
+        return np.zeros(len(df), dtype=np.float64)
+
+    pieces: list[np.ndarray] = []
+    for c in cols:
+        s = df[c]
+        if s.dtype.kind in "fiub":
+            pieces.append(s.to_numpy(dtype=np.float64))
+            continue
+        # Non-numeric column. Try float coercion first; if it fails, hash.
+        coerced = pd.to_numeric(s, errors="coerce")
+        if coerced.notna().all():
+            pieces.append(coerced.to_numpy(dtype=np.float64))
+            continue
+        # Stable hash mod 2^53 keeps values within float64 exact-int range so
+        # MAE between two identical string-valued columns is exactly 0.
+        pieces.append(
+            s.fillna("").astype(str).map(lambda v: float(hash(v) % (2 ** 53))).to_numpy(dtype=np.float64)
+        )
+    arr = np.stack(pieces, axis=-1).ravel()
     return arr
 
 
@@ -54,14 +89,17 @@ def check_against_log(
     submission_log_path: Path,
     threshold: float = 1e-6,
     id_col: Optional[str] = None,
+    prediction_cols: Optional[list[str]] = None,
 ) -> tuple[bool, float, Optional[str]]:
     """Compare candidate's predictions to every entry in submission_log.jsonl.
 
-    Returns (is_near_duplicate, min_mae, matching_run_id).
+    Returns (is_near_duplicate, min_mae, matching_run_id). Skips follow-up
+    records (`public_lb_known`) that have no `file` field. Pass `prediction_cols`
+    from `comp_profile.submission.columns` for exact targeting.
     """
     if not submission_log_path.exists():
         return False, float("inf"), None
-    candidate = load_predictions(candidate_csv, id_col=id_col)
+    candidate = load_predictions(candidate_csv, id_col=id_col, prediction_cols=prediction_cols)
     min_mae = float("inf")
     matching_run_id: Optional[str] = None
     with submission_log_path.open() as f:
@@ -73,11 +111,14 @@ def check_against_log(
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            prior_path = Path(entry.get("file", ""))
+            file_field = entry.get("file")
+            if not file_field:
+                continue   # e.g. public_lb_known follow-ups have no file
+            prior_path = Path(file_field)
             if not prior_path.exists():
                 continue
             try:
-                prior = load_predictions(prior_path, id_col=id_col)
+                prior = load_predictions(prior_path, id_col=id_col, prediction_cols=prediction_cols)
             except Exception:  # noqa: BLE001
                 continue
             d = mae(candidate, prior)

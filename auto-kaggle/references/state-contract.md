@@ -98,12 +98,16 @@ Resume protocol: orchestrator reads the **last** line per stage to know where to
 ### `stage0_bootstrap/comp_profile.yaml`
 
 ```yaml
-task_type: time-series-event-detection   # one of: binary | multiclass | regression
-                                         #         | image-classification | image-segmentation
-                                         #         | object-detection | nlp-classification
-                                         #         | nlp-token-classification | time-series-forecast
-                                         #         | time-series-event-detection | tabular-regression
-                                         #         | tabular-classification | other
+task_type: time-series-event-detection   # canonical values defined in
+                                         # auto-kaggle-bootstrap/references/task-type-detection.md
+                                         # (tabular-binary | tabular-multiclass | tabular-regression
+                                         # | tabular-ranking | image-classification | image-segmentation
+                                         # | image-detection | image-instance-segmentation
+                                         # | nlp-classification | nlp-regression
+                                         # | nlp-token-classification | nlp-generation
+                                         # | time-series-forecast | time-series-event-detection
+                                         # | audio-classification | multimodal | graph
+                                         # | recommendation | other)
 metric:
   name: event_detection_ap
   direction: maximize

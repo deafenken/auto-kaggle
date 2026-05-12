@@ -36,8 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
-import subprocess
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -131,28 +130,54 @@ def _build_message(run_id: str, citations: list[str], has_own: bool, cv: float, 
     return msg
 
 
-def _poll_public_lb(comp_slug: str, run_id: str, file_path: Path, max_wait_s: int = 600) -> float | None:
+_PUBLIC_LB_RE = re.compile(r"(-?\d+\.\d+)")
+
+
+def _poll_public_lb(
+    comp_slug: str,
+    submission_id: str | None,
+    submission_ts_iso: str,
+    message_head: str,
+    max_wait_s: int = 600,
+) -> float | None:
     """Poll `kaggle competitions submissions` until our submission shows a public score.
 
-    Heuristic match: latest submission whose filename matches our basename.
+    Match strategy (in priority order):
+      1. If we have the Kaggle submission id, look for it as a numeric token.
+      2. Otherwise, match by message head (the start of our submission message,
+         which is the run_id) AND a timestamp at or after our submit time —
+         this avoids collisions when two runs use the same basename
+         (`test_preds.csv` is identical across runs by design).
     """
-    target_name = file_path.name
     waited = 0
     backoffs = [30, 60, 120, 300]
     bi = 0
+    submit_ts_for_compare = (submission_ts_iso or "").rstrip("Z")
     while waited < max_wait_s:
-        raw = list_submissions(comp_slug)
-        # The verbose output includes filename and publicScore.
+        try:
+            raw = list_submissions(comp_slug)
+        except Exception:  # noqa: BLE001 — be resilient to transient errors here
+            time.sleep(backoffs[min(bi, len(backoffs) - 1)])
+            waited += backoffs[min(bi, len(backoffs) - 1)]
+            bi += 1
+            continue
         for line in raw.splitlines():
-            if target_name in line and "complete" in line.lower():
-                # Try to extract publicScore (last numeric column).
-                parts = line.split()
-                for p in reversed(parts):
-                    try:
-                        val = float(p)
-                        return val
-                    except ValueError:
-                        continue
+            lower = line.lower()
+            if "complete" not in lower:
+                continue
+            id_match = submission_id is not None and submission_id in line
+            msg_match = bool(message_head) and message_head[:40] in line
+            if not (id_match or msg_match):
+                continue
+            # publicScore is the last float on the line (privateScore appears
+            # only after the comp ends and is masked while live).
+            floats = _PUBLIC_LB_RE.findall(line)
+            if not floats:
+                continue
+            try:
+                return float(floats[-1])
+            except ValueError:
+                continue
         sleep = backoffs[min(bi, len(backoffs) - 1)]
         time.sleep(sleep)
         waited += sleep
@@ -230,10 +255,14 @@ def main() -> int:
     if state.exhausted:
         write_wait_until(stage_dir, state.next_reset_utc)
         _append_progress(progress_log, {"stage": "stage3", "event": "quota_exhausted"})
-        print(f"WAIT_UNTIL {state.next_reset_utc} (in {fmt_until(wu or datetime.fromisoformat(state.next_reset_utc.replace('Z', '+00:00')))})")
+        next_reset_dt = datetime.fromisoformat(
+            state.next_reset_utc.replace("Z", "+00:00")
+        )
+        print(f"WAIT_UNTIL {state.next_reset_utc} (in {fmt_until(next_reset_dt)})")
         if args.submit:
             sys.stderr.write("ESCALATE: quota exhausted, cannot submit until reset\n")
-        return 0 if not args.submit else 3
+            return 3
+        return 0
 
     if args.quota_only:
         write_heartbeat(run_dir, "stage3", "quota_only_done")
@@ -255,11 +284,40 @@ def main() -> int:
     write_recommendations(run_dir, text)
     _append_progress(progress_log, {"stage": "stage3", "event": "recommendation_refreshed"})
 
+    # Deadline mode (last 24h): also produce `final_selection.md` with SAFE +
+    # AMBITIOUS proposals. Both final submissions are still user-gated.
+    in_24h, in_6h, hours_left = _deadline_check(deadline_utc)
+    if in_24h:
+        from recommend import build_final_selection  # noqa: PLC0415
+
+        final_text = build_final_selection(
+            run_dir,
+            leaderboard,
+            submissions,
+            metric_direction=metric_dir,
+            metric_name=metric_name,
+            deadline_utc=deadline_utc,
+            alpha=args.alpha,
+            beta=float((cp.get("trust_beta") or 0.5)),
+        )
+        tmp = stage_dir / "final_selection.md.tmp"
+        tmp.write_text(final_text)
+        tmp.replace(stage_dir / "final_selection.md")
+        _append_progress(
+            progress_log,
+            {"stage": "stage3", "event": "deadline_mode", "hours_left": hours_left},
+        )
+
     if not args.submit:
         _append_progress(progress_log, {"stage": "stage3", "event": "awaiting_user_pick"})
         print(
             "Refreshed runs/<slug>/stage3_submit/recommendations.md — "
             "tell me which candidate to submit (or run with --submit <run_id>)."
+            + (
+                "  Deadline mode: see final_selection.md."
+                if in_24h
+                else ""
+            )
         )
         return 0
 
@@ -285,8 +343,7 @@ def main() -> int:
 
     cv, std, _metric = _read_cv(run_run_dir)
 
-    # Deadline-mode gates
-    in_24h, in_6h, hours_left = _deadline_check(deadline_utc)
+    # Deadline-mode gate (in_24h / in_6h / hours_left already computed above).
     if in_6h and not args.final_submission_confirm:
         sys.stderr.write(
             f"ESCALATE rule 9: only {hours_left}h to deadline; pass "
@@ -308,12 +365,19 @@ def main() -> int:
     if args.allow_near_duplicate and args.reason:
         message += f" [override near-dup: {args.reason[:60]}]"
 
-    # Final guard: Rule 2 — message must carry attribution.
-    if "attr:" not in message and not has_own:
-        sys.stderr.write("ESCALATE rule 2: built message has no attr: token\n")
+    # Final guard: Rule 2 — message must carry a real `attr: <author>/<slug>`
+    # token OR an explicit +own marker. The regex matches kaggle_helpers.submit_csv
+    # so the local check and the helper check stay in lockstep.
+    _attr_re = re.compile(r"attr:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+    if not _attr_re.search(message) and "+ own" not in message and "+own" not in message:
+        sys.stderr.write(
+            "ESCALATE rule 2: message lacks both a valid `attr: <author>/<slug>` "
+            "token and an explicit `+ own` marker.\n"
+        )
         return 3
 
     write_heartbeat(run_dir, "stage3", f"submitting {run_id}")
+    submit_ts_iso = _now_iso()
     try:
         stdout = submit_csv(comp_slug, preds_path, message, progress_log_path=progress_log)
     except KaggleAuthError as e:
@@ -329,7 +393,7 @@ def main() -> int:
                     break
 
     entry = {
-        "ts_utc": _now_iso(),
+        "ts_utc": submit_ts_iso,
         "run_id": run_id,
         "file": str(preds_path),
         "message": message,
@@ -344,21 +408,54 @@ def main() -> int:
         "near_duplicate_reason": args.reason if args.allow_near_duplicate else None,
     }
     _append_submission_log(log_path, entry)
-    _append_progress(progress_log, {"stage": "stage3", "event": "submitted", "run_id": run_id})
+    _append_progress(
+        progress_log,
+        {
+            "stage": "stage3",
+            "event": "submitted",
+            "run_id": run_id,
+            "kaggle_submission_id": submission_id,
+            "file": str(preds_path),
+        },
+    )
 
-    # Update quota cache locally (Kaggle reconcile next cycle will confirm).
+    # Persist quota cache so a crash before LB polling still leaves the right
+    # used_today on disk. Kaggle's next reconcile is authoritative, but our
+    # cache should be the right count between then.
     state.used_today += 1
     state.remaining = max(0, state.daily_limit - state.used_today)
     state.exhausted = state.used_today >= state.daily_limit
+    from quota import write_quota_state  # noqa: PLC0415
+
+    write_quota_state(stage_dir / "quota_state.yaml", state)
+    _append_progress(
+        progress_log,
+        {"stage": "stage3", "event": "quota_used", "used": state.used_today, "limit": state.daily_limit},
+    )
     write_heartbeat(run_dir, "stage3", "post_submit_poll_lb")
 
     # Poll for public LB (best-effort).
     print(f"submitted {run_id}; polling for public LB...")
-    public_lb = _poll_public_lb(comp_slug, run_id, preds_path)
+    public_lb = _poll_public_lb(
+        comp_slug,
+        submission_id=submission_id,
+        submission_ts_iso=submit_ts_iso,
+        message_head=run_id,
+    )
     if public_lb is not None:
-        entry["public_lb"] = public_lb
-        # Rewrite the last line — exception to append-only because the entry is incomplete.
-        _rewrite_last_log_entry(log_path, entry)
+        # APPEND a follow-up `public_lb_known` record instead of mutating the
+        # original `submitted` record. submission_log.jsonl is append-only;
+        # rewriting violated the long-running protocol's crash-safe contract.
+        followup = {
+            "ts_utc": _now_iso(),
+            "event": "public_lb_known",
+            "run_id": run_id,
+            "kaggle_submission_id": submission_id,
+            "public_lb": public_lb,
+            "cv_score": cv,
+            "gap": abs(public_lb - cv),
+        }
+        _append_submission_log(log_path, followup)
         record_submission_result(
             run_dir / "stage2_modeling" / "leaderboard.csv",
             run_id,
@@ -382,31 +479,79 @@ def main() -> int:
         _append_progress(progress_log, {"stage": "stage3", "event": "quota_exhausted"})
         print(
             f"WAIT_UNTIL {state.next_reset_utc} "
-            f"(quota exhausted; supervisor sleeps until then)"
+            f"(quota exhausted; supervisor will skip Stage 3 until reset, "
+            f"recon and modeling continue)"
         )
+
+    # Always write Stage 3 hand_off so the orchestrator and the user see the
+    # latest state of the world (whether we submitted, hit quota, or what).
+    _write_stage3_handoff(
+        stage_dir=stage_dir,
+        comp_slug=comp_slug,
+        state=state,
+        deadline_utc=deadline_utc,
+        leaderboard=_read_leaderboard(run_dir / "stage2_modeling" / "leaderboard.csv"),
+        last_submission_summary={
+            "run_id": run_id,
+            "public_lb": public_lb,
+            "cv_score": cv,
+            "submitted_at": submit_ts_iso,
+        },
+    )
 
     write_heartbeat(run_dir, "stage3", "submit_done")
     return exit_code
 
 
-def _rewrite_last_log_entry(path: Path, entry: dict) -> None:
-    """Replace the last line of submission_log.jsonl with `entry`.
-
-    Used once per submission, when public_lb finally lands. Append-only is
-    relaxed for this single case because the original entry was deliberately
-    incomplete (public_lb: null).
-    """
-    if not path.exists():
-        _append_submission_log(path, entry)
-        return
-    lines = path.read_text().splitlines()
-    if not lines:
-        _append_submission_log(path, entry)
-        return
-    lines[-1] = json.dumps(entry)
-    tmp = path.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(lines) + "\n")
-    tmp.replace(path)
+def _write_stage3_handoff(
+    *,
+    stage_dir: Path,
+    comp_slug: str,
+    state,
+    deadline_utc: str | None,
+    leaderboard: list[dict],
+    last_submission_summary: dict | None,
+) -> None:
+    """Stage 3 hand-off — read by the orchestrator after every Stage 3 cycle."""
+    n_completed = sum(1 for r in leaderboard if r.get("status") == "completed")
+    last_block = ""
+    if last_submission_summary:
+        lb = last_submission_summary.get("public_lb")
+        cv_s = last_submission_summary.get("cv_score")
+        gap_txt = "n/a" if lb is None or cv_s is None else f"{abs(lb - cv_s):.6f}"
+        last_block = (
+            f"## Last submission\n"
+            f"- run_id: `{last_submission_summary.get('run_id')}`\n"
+            f"- submitted: {last_submission_summary.get('submitted_at')}\n"
+            f"- CV: {cv_s}\n"
+            f"- public LB: {lb}\n"
+            f"- gap: {gap_txt}\n\n"
+        )
+    deadline_block = f"- Deadline (UTC): `{deadline_utc}`\n" if deadline_utc else ""
+    body = (
+        f"# Stage 3 hand-off ({_now_iso()})\n\n"
+        f"## What I did\n"
+        f"- Reconciled quota with Kaggle.\n"
+        f"- Refreshed recommendations.md.\n"
+        f"- (If submitted) appended to submission_log.jsonl.\n\n"
+        f"{last_block}"
+        f"## What's true now\n"
+        f"- Quota: {state.used_today}/{state.daily_limit} used today. "
+        f"Remaining: {state.remaining}. Next reset: {state.next_reset_utc}.\n"
+        f"- Total completed runs: {n_completed}.\n"
+        f"{deadline_block}\n"
+        f"## What you should do next\n"
+        f"- If quota remains and a new candidate is in the lead by >1× cv_std, "
+        f"surface it to the user via `recommendations.md`.\n"
+        f"- If exhausted, the supervisor will skip Stage 3 until "
+        f"`{state.next_reset_utc}`; Stages 1/2 may still run.\n"
+        f"- In the final 24h, deadline mode applies: `final_selection.md` is "
+        f"the canonical artifact and both final submissions are user-gated.\n"
+    )
+    tmp = stage_dir / "hand_off.md.tmp"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(body)
+    tmp.replace(stage_dir / "hand_off.md")
 
 
 if __name__ == "__main__":

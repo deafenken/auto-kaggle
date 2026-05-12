@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -136,16 +137,34 @@ def view_competition(slug: str, *, progress_log_path: Optional[Path] = None) -> 
 def download_competition_data(
     slug: str, dest_dir: Path, *, progress_log_path: Optional[Path] = None
 ) -> int:
-    """Download + unzip. Returns total bytes on disk after unzip."""
+    """Download + unzip. Returns total bytes on disk after unzip.
+
+    Crucially: only deletes the .zip after a successful unzip (return code 0).
+    Earlier versions deleted unconditionally, which destroyed the only copy of
+    the data when unzip failed (e.g. interrupted, disk full, corrupted archive).
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     _kaggle(
         ["competitions", "download", "-c", slug, "-p", str(dest_dir)],
         progress_log_path=progress_log_path,
         timeout=3600,
     )
-    # Unzip any zips in dest_dir.
     for zf in dest_dir.glob("*.zip"):
-        _run(["unzip", "-o", str(zf), "-d", str(dest_dir)])
+        result = _run(["unzip", "-o", str(zf), "-d", str(dest_dir)], timeout=3600)
+        if result.returncode != 0:
+            _append_progress(
+                progress_log_path,
+                {
+                    "stage": "stage0",
+                    "event": "unzip_failed",
+                    "zip": str(zf),
+                    "stderr": (result.stderr or "")[:300],
+                },
+            )
+            raise RuntimeError(
+                f"unzip failed for {zf} (exit {result.returncode}); zip preserved "
+                f"so re-running can retry. stderr: {(result.stderr or '')[:200]}"
+            )
         zf.unlink()
     total = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
     _append_progress(
@@ -163,6 +182,10 @@ def list_submissions(slug: str, *, progress_log_path: Optional[Path] = None) -> 
     return result.stdout
 
 
+_ATTR_TOKEN_RE = re.compile(r"attr:\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)")
+_OWN_ONLY_RE = re.compile(r"\+\s*own\b|\bDerived from:\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+
+
 def submit_csv(
     slug: str,
     csv_path: Path,
@@ -170,31 +193,33 @@ def submit_csv(
     *,
     progress_log_path: Optional[Path] = None,
 ) -> str:
-    """Submit a CSV. Returns raw stdout (contains the submission ID + status)."""
+    """Submit a CSV. Returns raw stdout (contains the submission ID + status).
+
+    Enforces integrity rule 2: the message must either contain at least one
+    `attr: <author>/<kernel-slug>` token OR an explicit `+ own` marker (with at
+    least one Derived-from line if no attribution kernels exist). Loose
+    substring checking is not enough — earlier versions accepted "attr: foo".
+    """
     if not csv_path.exists():
         raise FileNotFoundError(csv_path)
     if not message.strip():
         raise ValueError("submission message must not be empty (attribution required)")
-    if "attr:" not in message and "Derived from:" not in message:
-        # Integrity rule 2 — every submission message must carry attribution.
+    has_attr = bool(_ATTR_TOKEN_RE.search(message))
+    has_own = bool(_OWN_ONLY_RE.search(message))
+    if not has_attr and not has_own:
         raise ValueError(
-            "submission message missing attribution. Include 'attr: <author>/<kernel>' "
-            "or 'Derived from: <author>/<kernel>'."
+            "submission message missing attribution. Include at least one "
+            "`attr: <author>/<kernel-slug>` token (matching `[A-Za-z0-9._-]+/[A-Za-z0-9._-]+`), "
+            "or for genuinely original work add an explicit `+ own` marker."
         )
     result = _kaggle(
         ["competitions", "submit", "-c", slug, "-f", str(csv_path), "-m", message],
         progress_log_path=progress_log_path,
         timeout=900,
     )
-    _append_progress(
-        progress_log_path,
-        {
-            "stage": "stage3",
-            "event": "submitted",
-            "file": str(csv_path),
-            "message_head": message[:80],
-        },
-    )
+    # Note: caller (submit.py) emits the `submitted` progress event with full
+    # context (run_id, kaggle_submission_id, cv_score). We do NOT emit one here
+    # to avoid duplicate events.
     return result.stdout
 
 
@@ -246,24 +271,11 @@ def pull_kernel(
 
 
 # --- Quota reconciliation ----------------------------------------------------
-
-def count_submissions_today_utc(submissions_stdout: str) -> int:
-    """Parse the `kaggle competitions submissions -v` table and count today's UTC entries.
-
-    The -v (verbose / detail) output includes timestamps in the first column. We are
-    tolerant of formatting drift: any line that starts with a YYYY-MM-DD whose date
-    matches today UTC counts as one submission.
-    """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    count = 0
-    for line in submissions_stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Look for an ISO-like date at the start.
-        if len(line) >= 10 and line[:10] == today and (len(line) == 10 or not line[10].isalnum()):
-            count += 1
-    return count
+# The canonical quota parser lives in auto-kaggle-submit/assets/quota.py
+# (`parse_submissions_text`). The helper below was removed — the prior
+# implementation assumed the timestamp was the first column, but Kaggle CLI's
+# `-v` output puts `fileName` before `date`, so it would always count 0. Use
+# quota.parse_submissions_text() instead.
 
 
 def next_utc_midnight_iso() -> str:

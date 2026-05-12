@@ -123,8 +123,8 @@ def main() -> int:
     train_df = pd.read_csv(cfg["data_paths"]["train"])
     y_proxy = train_df.index.to_numpy()
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tabular-lgbm"))
-    from train import _split_iter  # noqa: PLC0415
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _cv_common import _split_iter  # noqa: PLC0415
 
     per_fold_scores: list[float] = []
     test_preds_all: list[np.ndarray] = []

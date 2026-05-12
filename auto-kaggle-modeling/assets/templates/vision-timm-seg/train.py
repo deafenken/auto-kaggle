@@ -174,8 +174,8 @@ def main() -> int:
     id_col = fc.get("id_col", "image_id")
     y_proxy = train_df.index.to_numpy()  # for shape; CV by index/group only
 
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tabular-lgbm"))
-    from train import _split_iter  # noqa: PLC0415
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _cv_common import _split_iter  # noqa: PLC0415
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metric_name = (cfg.get("metric") or {}).get("name", "dice")

@@ -59,26 +59,44 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-# `kaggle competitions submissions -v` produces a text table whose data rows
-# start with a `YYYY-MM-DD HH:MM:SS` timestamp. We detect those defensively.
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}:\d{2}")
+# `kaggle competitions submissions -v` produces a text table. Column order in
+# recent CLI versions is `fileName date description status publicScore privateScore`
+# — the timestamp is NOT in the first column. We search for ANY `YYYY-MM-DD HH:MM:SS`
+# substring in each row and use the LAST match (in case the filename happened to
+# contain a date-like string earlier in the line).
+_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
+_HEADER_TOKENS = {"filename", "date", "status", "description", "publicscore", "privatescore"}
 
 
 def parse_submissions_text(text: str, today_utc_date: str) -> tuple[int, Optional[str]]:
-    """Return (count of today's submissions, last submission ISO timestamp)."""
+    """Return (count of today's submissions, last submission ISO timestamp).
+
+    Robust to (a) column reordering across Kaggle CLI versions, (b) filenames
+    that contain date-like substrings, (c) the table header line.
+    """
     used = 0
     last_ts: Optional[str] = None
-    for line in text.splitlines():
-        m = _TS_RE.match(line.strip())
-        if not m:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
             continue
-        date = m.group(1)
-        # Reconstruct ISO timestamp.
-        # The original tokens look like "2026-05-12 14:22:03"; transform to ISO.
-        ts_str = line.strip()[: 19].replace(" ", "T") + "Z"
-        if last_ts is None or ts_str > last_ts:
-            last_ts = ts_str
-        if date == today_utc_date:
+        # Skip the table header (case-insensitive match for any column-name token).
+        lowered = line.lower()
+        if any(tok in lowered for tok in _HEADER_TOKENS) and not _TS_RE.search(line):
+            continue
+        matches = list(_TS_RE.finditer(line))
+        if not matches:
+            continue
+        # Take the LAST timestamp on the line — Kaggle's table has the submission
+        # time in the second column; if a filename earlier contains a date-like
+        # token, the later match is the real submission timestamp.
+        m = matches[-1]
+        date_part = m.group(1)
+        time_part = m.group(2)
+        ts_iso = f"{date_part}T{time_part}Z"
+        if last_ts is None or ts_iso > last_ts:
+            last_ts = ts_iso
+        if date_part == today_utc_date:
             used += 1
     return used, last_ts
 

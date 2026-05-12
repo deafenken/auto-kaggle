@@ -124,9 +124,11 @@ def record_run_failed(
         leaderboard_path,
         {"run_id": run_id, "ts_utc": _now_iso(), "status": reason},
     )
-    # Also write a sibling .err file with the error detail (not into the CSV).
+    # Atomic sibling .err file with the error detail (not into the CSV).
     err_path = leaderboard_path.with_name(f"{run_id}.err")
-    err_path.write_text(err)
+    tmp = err_path.with_suffix(".err.tmp")
+    tmp.write_text(err)
+    tmp.replace(err_path)
 
 
 def record_submission_result(

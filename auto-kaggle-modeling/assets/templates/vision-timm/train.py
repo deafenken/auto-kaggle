@@ -133,9 +133,10 @@ def main() -> int:
     id_col = fc.get("id_col", "image_id")
     y_train = train_df[target_col].to_numpy()
 
-    # CV split — same scheme dispatch as tabular template
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tabular-lgbm"))
-    from train import _split_iter  # noqa: PLC0415
+    # CV split — shared dispatch lives next to this file as `_cv_common.py`
+    # (copied by modeling.py at run setup).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _cv_common import _split_iter  # noqa: PLC0415
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     per_fold_scores: list[float] = []

@@ -198,18 +198,16 @@ def _stack(
 
 
 def _compute_metric(metric_name: str, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    # Mirror tabular-lgbm's metric function to keep behavior identical.
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tabular-lgbm"))
-    from train import _compute_metric as _cm  # noqa: PLC0415
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _cv_common import _compute_metric as _cm  # noqa: PLC0415
 
     return _cm(metric_name, y_true, y_pred)
 
 
 def _cv_indices(cfg: dict[str, Any], y_true: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
-    sys.path.insert(0, str(Path(__file__).parent.parent / "tabular-lgbm"))
-    from train import _split_iter  # noqa: PLC0415
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _cv_common import _split_iter  # noqa: PLC0415
 
-    # Build a dummy DataFrame with just the target so KFold/StratifiedKFold get the shape.
     dummy = pd.DataFrame({"target": y_true})
     return [(tr, va) for _, tr, va in _split_iter(cfg, dummy, y_true)]
 

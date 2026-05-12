@@ -133,7 +133,12 @@ while true; do
     continue
   fi
 
-  # 5. wait_until.txt — sleep until then
+  # 5. wait_until.txt — informational only. Per long-running-protocol.md,
+  # quota exhaustion (wait_until) pauses **Stage 3 (submit)**, not Stages 1/2.
+  # The orchestrator on resume reads wait_until.txt and skips the submit step
+  # while letting recon and modeling run normally. So the supervisor does NOT
+  # sleep through the wait period — it just logs how long is left and continues
+  # to invoke the orchestrator at the normal poll cadence.
   WAIT_FILE="$RUN_DIR/stage3_submit/wait_until.txt"
   if [[ -f "$WAIT_FILE" ]]; then
     wu=$(cat "$WAIT_FILE" 2>/dev/null | head -n1 | tr -d '[:space:]')
@@ -142,9 +147,7 @@ while true; do
       now_epoch=$(now_utc_epoch)
       if (( wu_epoch > now_epoch )); then
         delta=$(( wu_epoch - now_epoch ))
-        echo "[supervisor] wait_until=$wu, sleeping $delta s"
-        sleep "$delta"
-        continue
+        echo "[supervisor] wait_until=$wu (in ${delta}s) — submit will sleep, recon/modeling will run"
       fi
     fi
   fi

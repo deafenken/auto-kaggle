@@ -38,11 +38,28 @@ runs/<comp_slug>/
 │   ├── rules_summary.md           # human-readable distillation of Overview + Rules + Evaluation
 │   ├── data_stats.md              # row counts, file sizes, column types, target distribution
 │   ├── compute_env.yaml           # user's chosen env + capability vector
-│   ├── raw_comp_view.json         # cached output of `kaggle competitions view <slug>`
+│   ├── raw_comp_view.txt          # cached output of `kaggle competitions view <slug>`
 │   └── hand_off.md
 ```
 
 Exact schemas: `auto-kaggle/references/state-contract.md`.
+
+### Two-phase write
+
+`bootstrap.py` produces a **partial** `comp_profile.yaml` (with
+`bootstrap_partial: true`) and a partial `hand_off.md` that names the gaps —
+it cannot WebFetch the Rules / Evaluation pages itself. The agent then
+completes Steps 1, 7, and 8 below: writing `compute_env.yaml` from the user's
+answers, writing `rules_summary.md` from the fetched pages, and filling the
+remaining `comp_profile.yaml` fields (metric direction, daily quota, team
+rules, external data rules, code-only constraints). The agent flips
+`bootstrap_partial: false` once everything is in.
+
+The orchestrator's idempotency check (`bootstrap.py is_bootstrap_done`) only
+returns true when **all of**: `comp_profile.yaml` exists with
+`bootstrap_partial: false`, `rules_summary.md` exists, and `compute_env.yaml`
+exists. A run with only the script's partial outputs will re-trigger the agent
+finalization on the next invocation, not be silently treated as complete.
 
 ## Workflow
 
