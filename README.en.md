@@ -1,170 +1,183 @@
-# Auto Kaggle Skills
+<div align="center">
 
-`auto-kaggle` is a staged "give me a Kaggle URL → grind for medals across days" skill suite for Claude Code and Codex agents.
+# 🎯 auto-kaggle
 
-The core idea: split Kaggle medal hunting into 4 stages, each owned by its own skill, with stages handing off through files under `runs/<comp_slug>/`. **All state lives on disk**, so the agent process can crash and resume at will until the competition deadline (or until you drop a `STOP` file).
+### Drop a URL. Hunt Medals.<br/>Autonomous · CV-First · Crash-Safe.
+
+*Just tell Claude Code or Codex:* **`auto kaggle <slug>`**
+*→ multi-day grinding → ranked candidates → you pick the final 2.*
+
+<!-- A hand-drawn hero image can be dropped into docs/hero.png.
+     See docs/hero-prompt.md for a verbatim prompt you can paste into
+     GPT-image-1 / Midjourney / Gemini. The README does not break
+     without the image — the mermaid diagram below is the canonical hero. -->
+
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#)
+[![Kaggle API](https://img.shields.io/badge/Kaggle-CLI-20BEFF.svg?logo=kaggle&logoColor=white)](#)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-Compatible-D97757.svg)](https://claude.ai/code)
+[![Codex](https://img.shields.io/badge/Codex-Compatible-10A37F.svg?logo=openai&logoColor=white)](#)
+[![Skills](https://img.shields.io/badge/Skills-5-8A2BE2.svg)](auto-kaggle/SKILL.md)
+[![Codex Audit](https://img.shields.io/badge/Codex%20Audit-Passed-2EA44F.svg)](audit/codex-review-2026-05-12.md)
+
+</div>
+
+```mermaid
+flowchart LR
+    U(["👤 You"]) -->|"<b>auto kaggle &lt;slug&gt;</b>"| O{{"🎯 Orchestrator<br/>resume-by-default"}}
+    O --> S0["📥 Stage 0<br/>Bootstrap"]
+    S0 --> S1["🔍 Stage 1<br/>Recon<br/><i>top public kernels<br/>+ attribution</i>"]
+    S1 --> S2["🧪 Stage 2<br/>Modeling<br/><i>CV-aware<br/>fold-checkpointed</i>"]
+    S2 --> S3["📊 Stage 3<br/>Submit<br/><i>trust-adjusted CV<br/>+ quota tracker</i>"]
+    S3 -->|"used &lt; limit"| P(["👤 You pick"])
+    S3 -->|"used == limit"| W["😴 wait_until<br/>00:00 UTC"]
+    W -.->|"supervisor.sh wakes"| O
+    P -->|"submit"| K[("Kaggle LB")]
+    K -->|"public_lb"| S2
+    classDef hot fill:#FFEDD5,stroke:#EA580C,color:#7C2D12,stroke-width:2px;
+    classDef cold fill:#DBEAFE,stroke:#2563EB,color:#1E3A8A,stroke-width:2px;
+    classDef warn fill:#FEF3C7,stroke:#D97706,color:#78350F,stroke-width:2px;
+    class O,S0,S1,S2,S3 hot
+    class U,P,K cold
+    class W warn
+```
+
+<div align="center"><sub><i>Multi-day, multi-process. Resume-by-default. Claude Code <code>/loop</code> or <code>supervisor.sh</code> keeps it alive until the deadline (or a <code>STOP</code> file).</i></sub></div>
 
 ---
 
-## TL;DR
+## ✨ What it does
 
-> You give it a Kaggle competition URL. It asks for your compute environment, downloads data, periodically scrapes top public kernels for ideas (with attribution), trains its own CV-aware pipeline, shows you real-time quota ("3/5 submissions used today, next reset in 2h 17m"), and presents ranked submission candidates for **you** to pick — then runs `kaggle competitions submit` for the one you chose and goes back to training.
+Drop in a Kaggle competition URL. The skill suite — five staged Claude / Codex agents — boots the run, periodically scrapes top public kernels for ideas (with mandatory attribution), trains its own CV-aware pipeline with fold-by-fold checkpoints, and surfaces ranked submission candidates with real-time quota: *"3/5 used today · next reset in 2h 17m."* You pick which to submit. It survives crashes, context resets, network blips, and quota exhaustion via append-only logs, atomic writes, and a `wait_until.txt` sleep protocol.
 
-It is **not** a cheat tool, **not** an auto-submit firehose, **not** a "blindly fork the top public kernel" script. The final 2 submissions are always your call.
+**Default goal:** lock silver, reach for gold. **Final 2 submissions:** always your call.
+
+## 🚀 In 60 seconds
+
+```bash
+# 1) Install Kaggle CLI + accept comp rules in your browser
+pip install --upgrade kaggle
+mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
+
+# 2) Drop the 5 skill folders into Claude Code (or Codex skills dir)
+mkdir -p ~/.claude/skills
+cp -r auto-kaggle auto-kaggle-bootstrap auto-kaggle-recon \
+      auto-kaggle-modeling auto-kaggle-submit ~/.claude/skills/
+
+# 3) Tell Claude Code / Codex:
+#       auto kaggle https://www.kaggle.com/competitions/playground-series-s4e5
+#    (or just `auto kaggle playground-series-s4e5`)
+```
+
+That's it. The bootstrap stage asks you 4 questions (compute env, Kaggle handle, target tier, supervisor mode), then the loop runs.
+
+## ⚙️ The 5 skills
+
+| Skill | Role | Reads | Writes |
+|---|---|---|---|
+| 🎯 [`auto-kaggle`](auto-kaggle/SKILL.md) | Orchestrator (routing + gating, no research) | `run.yaml`, all stages' `hand_off.md` | `.heartbeat`, `progress.jsonl` |
+| 📥 [`auto-kaggle-bootstrap`](auto-kaggle-bootstrap/SKILL.md) | Stage 0: parse comp, download data, detect task type | comp URL, user answers | `comp_profile.yaml`, `rules_summary.md`, `compute_env.yaml` |
+| 🔍 [`auto-kaggle-recon`](auto-kaggle-recon/SKILL.md) | Stage 1: pull top public kernels, distill ideas with citations | `comp_profile.yaml`, last recon ts | `ideas_pool.md`, `citations.bib`, `kernels_index.json` |
+| 🧪 [`auto-kaggle-modeling`](auto-kaggle-modeling/SKILL.md) | Stage 2: own pipeline, CV-aware training, ablations | `ideas_pool.md`, `compute_env.yaml` | `pipeline.py`, `leaderboard.csv`, fold OOFs |
+| 📊 [`auto-kaggle-submit`](auto-kaggle-submit/SKILL.md) | Stage 3: rank, track quota, write recs, submit on user pick | `leaderboard.csv`, `submission_log.jsonl` | `recommendations.md`, `quota_state.yaml`, `wait_until.txt` |
+
+Plus four templates under `auto-kaggle-modeling/assets/templates/`: fully-functional **`tabular-lgbm`** and **`ensemble`** (blend/stack), plus skeletons for **`vision-timm`**, **`vision-timm-seg`**, **`vision-det`**, **`nlp-hf`**.
+
+## 📁 What ends up on disk
+
+```text
+runs/<comp_slug>/
+├── run.yaml               # comp slug, compute env, target tier, deadline, supervisor mode
+├── .heartbeat             # {stage, substep, ts_utc, pid} — peek anytime
+├── progress.jsonl         # append-only micro-step log
+├── data/raw/              # `kaggle competitions download` output (gitignored)
+├── stage0_bootstrap/      # comp_profile.yaml, rules_summary.md, compute_env.yaml
+├── stage1_recon/          # ideas_pool.md, citations.bib, kernels/
+├── stage2_modeling/       # pipeline.py, runs/<run_id>/, leaderboard.csv
+├── stage3_submit/         # recommendations.md, submission_log.jsonl, quota_state.yaml,
+│                          # wait_until.txt (when daily quota is exhausted), final_selection.md (last 24h)
+└── STOP / PAUSE           # touch to stop / pause cleanly
+```
+
+## 🔥 Why it doesn't die mid-run
+
+Kaggle competitions run for **days to months**, and the agent will be killed many times (context fills, laptop closes, network blips). The skill is built to come back:
+
+| Failure | What survives | Why |
+|---|---|---|
+| Claude Code `/clear` | Everything | Zero memory crosses invocations — all state is on disk |
+| Mid-fold crash | All prior folds | Per-fold OOFs saved atomically, sidecar score files preserve CV |
+| Mid-submit network drop | The submission log | `submission_log.jsonl` is append-only; `kaggle competitions submissions` is reconciled-against on resume |
+| Daily quota burns out | The whole pipeline | `wait_until.txt` written; supervisor lets Stages 1–2 keep working, Stage 3 sleeps |
+| Host reboot | All state | Atomic `.tmp` + rename for every write; `supervisor.sh` restarts the agent |
+| Final 2 submission | **You** decide | Rules 3 & 9: deadline mode forces user gating; `final_selection.md` proposes SAFE + AMBITIOUS |
+
+Three supervisor modes — pick by how long you can keep something running:
+
+```bash
+# (A) manual — you invoke whenever
+> auto kaggle resume <slug>
+
+# (B) Claude Code /loop — runs while Claude Code is open
+> /loop /auto-kaggle resume <slug>
+
+# (C) shell-supervisor — 24/7 on a machine that stays up
+nohup bash auto-kaggle/assets/supervisor.sh <slug> > supervisor.log 2>&1 &
+```
+
+## 📜 Integrity rules
+
+10 non-negotiables — full text in [`auto-kaggle/references/integrity-rules.md`](auto-kaggle/references/integrity-rules.md).
+
+1. No verbatim copying from public kernels — ideas are re-implemented.
+2. Every `submit -m` carries `attr: <author>/<kernel-slug>`.
+3. CV-first selection — never rank by raw public LB.
+4. No LB probing — near-duplicate submissions blocked locally.
+5. Single account — multi-account refused.
+6. Quota honesty — no random/duplicate predictions to burn slots.
+7. CV split is set once, only the user changes it (no reverse-tuning to LB).
+8. Compute budget gated before every run.
+9. Last 24h: deadline mode — final 2 submissions always user-picked.
+10. External data must be Kaggle-shared and user-approved.
+
+These map 1-for-1 to code paths the [Codex audit](audit/codex-review-2026-05-12.md) verified.
 
 ---
 
-## Beginner's Notice
+<details>
+<summary><b>🆕 New to Kaggle? Read this first.</b></summary>
 
 ### Who this is for
-
-- You have a Kaggle account, can log in, and can accept competition rules on the website.
-- You want to lock a silver medal / reach for gold (the default tier is `silver-floor-gold-ceiling`).
-- You have at least one machine that can stay on for a long time (local GPU, cloud GPU, or an open Kaggle Notebook). Without that, "multi-day fully automatic" is moot.
-- You're willing to check `recommendations.md` once or twice a day and pick the candidate to submit.
+- You have a Kaggle account and can accept competition rules in your browser.
+- You want to lock silver / reach gold (`silver-floor-gold-ceiling` is the default tier).
+- You have at least one machine that can stay on for days (local GPU, cloud GPU, or an open Kaggle Notebook).
+- You're willing to read `recommendations.md` once or twice a day and pick a candidate.
 
 ### Who this is **not** for
+- People who have never seen a Kaggle competition — run `titanic` end-to-end first by hand.
+- Knowledge / Tutorial competitions — bootstrap rejects them.
+- People wanting to bypass quotas, multi-account, or strip attribution — Rules 1, 2, 5 block all of this.
 
-- People who have never seen a Kaggle competition. Run `titanic` end-to-end first by hand.
-- Knowledge / Tutorial competitions with no medals — the bootstrap stage rejects these.
-- People wanting to bypass submission quotas, multi-account, or strip attribution from forked kernels. Integrity rules 1 / 2 / 5 block all of this.
+### Walk through it once before targeting a medal
 
-### What you need to set up first
+1. **Try the skill on Titanic first.** No medals on the line. You see how the 4 stages, the recommendations file, the quota tracker, the wait-until protocol all fit together.
+2. **Pick a medium-popularity ongoing comp** (< 1000 teams, 1+ month to deadline). Let the skill run for a week and watch CV vs public LB tracking, and how the skill's top recommendation compares to what you'd have picked.
+3. Only after that, point it at a comp you actually want to medal in.
 
-1. **Install Claude Code or the Codex CLI**, and confirm normal conversation works.
-2. **Install + authenticate the Kaggle CLI:**
-   ```bash
-   pip install --upgrade kaggle
-   # Download kaggle.json from https://www.kaggle.com/<you>/account
-   mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
-   kaggle competitions list   # if this lists comps, you're good
-   ```
-3. **Open the competition in a browser, log in, and click the "Submit" / "Late Submission" button to accept the rules**. This step is not automatable — if you skip it, `kaggle competitions download` returns 403.
-4. **Decide on a compute environment** (bootstrap will ask you to pick):
-   - `kaggle-notebook` — free T4×2 / P100, 9h per kernel, 30h GPU/week. Mandatory for code-only comps.
-   - `local-gpu` — your own machine; supply GPU model and VRAM.
-   - `cloud-gpu` — Colab Pro / Lambda / Vast / RunPod; you keep it alive.
-   - `cpu-only` — only viable for small tabular comps.
-5. **Vocabulary you should know**:
-   - **public LB vs private LB**. Public LB scores a slice of the test set in real time. Private LB is the rest, revealed after deadline; medals come from private LB. **Chasing public LB blindly is the classic shake-up trap.**
-   - **shake-up** — large public→private rank movement; top-10 public dropping to 200+ on private is routine.
-   - **CV (cross-validation)** — your local score; the only signal that actually predicts private LB.
-   - **daily quota** — usually 5 submissions/day, resets at 00:00 UTC.
-   - **attribution** — your submission message must name the public kernels that inspired this submission. The skill enforces this.
-6. **Read `auto-kaggle/references/integrity-rules.md`**, especially rules 1 / 3 / 4 / 5 — they're what stops your account from being reported.
+This step matters more than any tooling below. Skip it and you'll burn GPU hours and submission slots on bad judgment calls.
 
-### If you're new to Kaggle (the most important step — do this first)
+### Vocabulary you should know
 
-No amount of skill scaffolding makes up for not knowing Kaggle culture. Before you point this at a real medal target:
+- **public LB vs private LB**: public scores ~30% of test in real time; private = the rest, revealed at deadline. Medals come from private LB. **Chasing public LB is the classic shake-up trap.**
+- **shake-up**: large public→private rank movement; top-10 public falling to 200+ private is routine.
+- **CV (cross-validation)**: your local score; the only signal that actually predicts private LB.
+- **daily quota**: usually 5 submissions/day, resets 00:00 UTC.
+- **attribution**: your submission message must name the public kernels that inspired this submission. The skill enforces this.
 
-1. **Walk through Titanic by hand using the skill.** `auto-kaggle titanic` runs the full 4-stage flow on a no-medal comp so you can feel how `recommendations.md`, quota tracking, and the stage hand-offs work. No risk.
-2. **Pick a medium-popularity ongoing comp** (< 1000 teams, 1+ month to deadline; Playground Series competitions are good first targets). Let the skill run for a week and watch:
-   - Is the gap between CV and public LB stable?
-   - Are the top candidates in `recommendations.md` actually competitive?
-   - How much does your manual final pick differ from the skill's #1 ranked?
-3. Only when you can explain in a few sentences "what the top public kernels here are doing, how private LB is likely to shake, and what I can add to beat them" should you point the skill at a comp you actually want to medal in.
+</details>
 
-This step matters more than any tooling below. Skip it and you're just burning GPU hours and submission slots.
-
----
-
-## What each of the four skills does
-
-| Skill | Role | Input | Outputs |
-|---|---|---|---|
-| `auto-kaggle` | Orchestrator (no research, only routing + gating) | Comp URL + 4 user answers | `runs/<slug>/run.yaml`, heartbeat, progress.jsonl, hand-off integrity checks |
-| `auto-kaggle-bootstrap` | Stage 0: parse comp, download data, ask compute env | comp URL | `comp_profile.yaml` / `rules_summary.md` / `data_stats.md` / `compute_env.yaml` |
-| `auto-kaggle-recon` | Stage 1: periodically scrape top public kernels, distill ideas | comp_profile + last_recon_at | `kernels_index.json` / `ideas_pool.md` / `citations.bib` |
-| `auto-kaggle-modeling` | Stage 2: build the user's own pipeline with CV; integrate recon ideas | ideas_pool + comp_profile | `pipeline.py` / `runs/<run_id>/` / `leaderboard.csv` |
-| `auto-kaggle-submit` | Stage 3: rank candidates, track quota, recommend, submit on user pick | leaderboard + quota_state | `recommendations.md` / `submission_log.jsonl` / `quota_state.yaml` / `wait_until.txt` |
-
-`auto-kaggle` itself **never scrapes kernels, never trains, never submits.** It sequences the four skills, enforces integrity rules, manages resume / wait_until / heartbeat.
-
----
-
-## Pipeline at a glance
-
-```
-                  ┌──────────────────────────────────────────────────────────┐
-                  │       auto-kaggle  (orchestrator)                        │
-                  └──────────────────────────────────────────────────────────┘
-                                       │
-   First time? ────yes──────►  Stage 0: auto-kaggle-bootstrap
-                                       │   ask compute env, download data,
-                                       │   parse rules, detect task type
-                                       ▼
-                       ┌── periodic recon ──►  Stage 1: auto-kaggle-recon
-                       │                         pull top public kernels,
-                       │                         distill ideas with citations
-                       │                         (every N hours, configurable)
-                       ▼
-                  Stage 2: auto-kaggle-modeling
-                     own pipeline + CV-aware training
-                     + recon ideas with ablations
-                       │
-                       ▼
-                  Stage 3: auto-kaggle-submit
-                     rank by trust-adjusted CV → check quota → write recommendations.md
-                     wait for user pick → actually submit → log to submission_log.jsonl
-                       │
-                  quota exhausted? ──yes──► write wait_until.txt, exit
-                       │ no
-                       └──► loop: more modeling / next recon / next submit
-```
-
----
-
-## Why "won't die" matters
-
-A Kaggle run takes days to months. The agent process **will** stop for any of:
-
-- Claude Code context fills and you `/clear`
-- You close the laptop
-- Network blip during `kaggle competitions submit`
-- Host reboot
-- Token / quota runs out
-
-The skill is designed so all of these are recoverable:
-
-- **All state on disk.** `.heartbeat`, `progress.jsonl`, `submission_log.jsonl`, `quota_state.yaml`, `wait_until.txt` — every file is on disk; no agent memory crosses invocations.
-- **Append-only logs.** Crashes mid-write leave at worst a truncated last line; resume tolerates it.
-- **Wait-until protocol.** When daily quota hits zero, the skill writes `wait_until.txt` with the next UTC midnight and exits. The supervisor sleeps until then.
-- **`assets/supervisor.sh`.** A shell loop that invokes the agent headless (`claude -p ...`), survives crashes, respects STOP/PAUSE/wait_until.
-
-Three scheduling modes, pick by how long you can keep something running:
-
-- `manual` — you invoke `/auto-kaggle resume <slug>` whenever. Safest.
-- `claude-loop` — inside Claude Code: `/loop /auto-kaggle resume <slug>`. Runs while Claude Code is open.
-- `shell-supervisor` — `nohup bash auto-kaggle/assets/supervisor.sh <slug> > supervisor.log 2>&1 &` on a machine that stays up.
-
-Stop anytime: `touch runs/<comp_slug>/STOP`.
-Pause anytime: `touch runs/<comp_slug>/PAUSE` (delete to resume).
-Peek at progress without invoking the agent:
-```
-cat runs/<comp_slug>/.heartbeat
-tail -n 20 runs/<comp_slug>/progress.jsonl
-cat runs/<comp_slug>/stage3_submit/recommendations.md
-cat runs/<comp_slug>/stage3_submit/quota_state.yaml
-```
-
----
-
-## Design principles (integrity rules — `auto-kaggle/references/integrity-rules.md`)
-
-1. **No verbatim copying** — public kernels are reference only; code is re-implemented with attribution.
-2. **Every `submit -m` carries `attr:`** — naming 1–3 most influential public kernels.
-3. **CV-first selection** — never rank final candidates by public LB.
-4. **No LB probing** — near-duplicate submissions are blocked locally.
-5. **Single account** — multi-account refused.
-6. **Quota honesty** — no submitting random / placeholder predictions to burn slots.
-7. **No reverse-tuning CV to match LB** — that's overfitting to the LB; private-LB suicide.
-8. **Compute budget gate** — runs over budget escalate before starting.
-9. **Deadline mode** — last 24h: no new architectures, only ensembling existing OOFs; final 2 submissions are user-gated.
-10. **External data must be Kaggle-shared** — otherwise possible DQ.
-
----
-
-## Installation
+<details>
+<summary><b>🛠 Installation</b></summary>
 
 ### Claude Code
 
@@ -180,60 +193,52 @@ Or project scope: `<project>/.claude/skills/`. Then `/skills` to confirm all 5 n
 
 Drop the same five folders into your Codex skills directory; `agents/openai.yaml` provides UI metadata.
 
----
+### Kaggle CLI
 
-## Quick start
+```bash
+pip install --upgrade kaggle
+# Download kaggle.json from https://www.kaggle.com/<you>/account
+mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
+kaggle competitions list   # should list comps if configured right
+```
+
+Open the target competition in a browser, log in, accept the rules. Without this `kaggle competitions download` returns 403.
+
+</details>
+
+<details>
+<summary><b>📂 Repo layout</b></summary>
 
 ```text
-You: auto kaggle https://www.kaggle.com/competitions/playground-series-s4e5
-
-Agent:
-  → Asks: compute env / username / tier / supervisor mode
-  → Stage 0: downloads data, parses rules, writes comp_profile.yaml, deadline in 27 days
-  → Stage 1: pulls top 30 public kernels, distills 14 ideas with citations
-  → Stage 2: runs a 5-fold LightGBM baseline, CV RMSE 0.745
-  → Stage 3: writes recommendations.md with the single candidate, quota 0/5, waits for your pick
-You: submit candidate 1
-Agent:
-  → kaggle competitions submit ..., public LB 0.748
-  → Continues training new ideas...
-  → Today 5/5 used: writes wait_until.txt = 2026-05-13T00:00:00Z, exits
-  (Supervisor sleeps until UTC midnight, then resumes with quota reset)
-```
-
-Anytime:
-```
-cat runs/playground-series-s4e5/.heartbeat
-cat runs/playground-series-s4e5/stage3_submit/recommendations.md
-```
-
----
-
-## Repository layout
-
-```text
-auto-kaggle/             # orchestrator
+auto-kaggle/             # orchestrator + state contract + integrity rules + supervisor.sh
 auto-kaggle-bootstrap/   # Stage 0
 auto-kaggle-recon/       # Stage 1
-auto-kaggle-modeling/    # Stage 2
+auto-kaggle-modeling/    # Stage 2 (+ templates: tabular-lgbm, ensemble, vision-timm[-seg], vision-det, nlp-hf)
 auto-kaggle-submit/      # Stage 3
-README.md
-README.en.md
-README.zh-CN.md
+audit/codex-review-*.md  # external code audits
+docs/                    # hero image + prompt for regenerating it
+README.md  README.en.md  README.zh-CN.md
+CLAUDE.md                # editor notes for Claude Code
 ```
 
-Each skill folder contains:
-- `SKILL.md` — triggers + workflow
-- `references/` — load-on-demand guidance
-- `assets/` — helper scripts, templates, supervisor.sh
-- `agents/openai.yaml` — Codex UI metadata (Claude ignores)
+Each skill folder has `SKILL.md` (workflow), `references/` (load-on-demand specs), `assets/` (helpers + templates), and `agents/openai.yaml` (Codex UI metadata).
+
+</details>
+
+<details>
+<summary><b>📝 Notes (not legal advice)</b></summary>
+
+- This is **infrastructure for grinding Kaggle**, not a disclaimer: if you violate Kaggle's rules, your account is still on the line.
+- The skill **never auto-submits the final 2** — rules 3 + 9 force user gating in the last 24h.
+- The skill **never modifies** `cv_split.yaml` on its own — once set, only you change it.
+- Data lives under `runs/<comp_slug>/data/` and is `.gitignored`. Never commit it.
+- Credentials (`kaggle.json`) live in `~/.kaggle/`, never under `runs/`.
+- Detailed code audit in `audit/codex-review-2026-05-12.md`. The follow-up fix commit verifies every finding.
+
+</details>
 
 ---
 
-## Notes
-
-- This is infrastructure for grinding Kaggle, **not a disclaimer**: if you violate rules, your account is still on the line.
-- The final 2 submissions are always your pick; the skill ranks + recommends, never silently submits both.
-- The skill **does not** modify `cv_split.yaml` on its own — once the CV scheme is set, only you change it.
-- Data lives under `runs/<comp_slug>/data/` and is in `.gitignore`. Never commit it.
-- Credentials (`kaggle.json`) live in `~/.kaggle/`, never under `runs/`.
+<div align="center"><sub>
+中文版 → <a href="README.zh-CN.md">README.zh-CN.md</a> · Code under MIT · 2026
+</sub></div>
