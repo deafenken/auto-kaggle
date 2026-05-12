@@ -7,10 +7,7 @@
 *Just tell Claude Code or Codex:* **`auto kaggle <slug>`**
 *→ multi-day grinding → ranked candidates → you pick the final 2.*
 
-<!-- A hand-drawn hero image can be dropped into docs/hero.png.
-     See docs/hero-prompt.md for a verbatim prompt you can paste into
-     GPT-image-1 / Midjourney / Gemini. The README does not break
-     without the image — the mermaid diagram below is the canonical hero. -->
+<a href="docs/hero.png"><img src="docs/hero.png" alt="auto-kaggle: drop a URL, hunt medals — autonomous, CV-first, crash-safe" width="720"/></a>
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#)

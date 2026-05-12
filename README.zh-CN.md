@@ -7,9 +7,7 @@
 *对 Claude Code 或 Codex 说一句:* **`auto kaggle <slug>`**
 *→ 自动跑数天 → 候选按 trust-adjusted CV 排序 → 你来挑最后 2 个。*
 
-<!-- 想加手绘 hero 图,把生成结果丢到 docs/hero.png 即可,
-     docs/hero-prompt.md 里有可以直接喂给 GPT-image-1 / Midjourney / Gemini 的 prompt。
-     图缺失也不影响 README,下面的 mermaid 流程图就是默认 hero。 -->
+<a href="docs/hero.png"><img src="docs/hero.png" alt="auto-kaggle:扔个 URL,自动多日刷奖牌,CV 为先,崩了能续" width="720"/></a>
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#)
