@@ -68,7 +68,7 @@ When editing any skill: every new code path must say how it satisfies (or escala
 
 - Keep `SKILL.md` frontmatter `description` within Claude Code's 1024-character limit and unambiguous about when to trigger.
 - Examples in skills use absolute dates and absolute UTC timestamps. Never write "today" or "yesterday" — those rot.
-- The repo intentionally has both English (`README.en.md`) and Chinese (`README.zh-CN.md`) READMEs; if you change one substantively, mirror the change in the other.
+- The repo intentionally has both English (`README.md` — GitHub's default render) and Chinese (`README.zh-CN.md`) READMEs; if you change one substantively, mirror the change in the other.
 - Helper scripts (`bootstrap.py`, `kaggle_helpers.py`, `supervisor.sh`) follow `state-contract.md` for input/output paths. Do not invent new paths in helpers.
 - `kaggle.json` and any credential file are out of scope for this repo. The skill reads CLI auth from `~/.kaggle/` only.
 - `.gitignore` includes `runs/`, `kaggle.json`, `.kaggle/`, `__pycache__/`, `._*`, large data extensions. Verify before committing.

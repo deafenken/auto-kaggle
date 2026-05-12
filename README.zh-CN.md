@@ -216,7 +216,7 @@ auto-kaggle-modeling/    # Stage 2(及训练模板:tabular-lgbm, ensemble, visio
 auto-kaggle-submit/      # Stage 3
 audit/codex-review-*.md  # 外部审计报告
 docs/                    # hero 图 + 重新生成 hero 图的 prompt
-README.md  README.en.md  README.zh-CN.md
+README.md  README.zh-CN.md
 CLAUDE.md                # 给 Claude Code 编辑此仓库的指导
 ```
 
@@ -239,5 +239,5 @@ CLAUDE.md                # 给 Claude Code 编辑此仓库的指导
 ---
 
 <div align="center"><sub>
-English → <a href="README.en.md">README.en.md</a> · Code under MIT · 2026
+English → <a href="README.md">README.md</a> · Code under MIT · 2026
 </sub></div>
