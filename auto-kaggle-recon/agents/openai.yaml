@@ -1,0 +1,19 @@
+name: auto-kaggle-recon
+display_name: Auto-Kaggle Stage 1 — Recon
+description: |
+  Stage 1 of auto-kaggle (NOT YET IMPLEMENTED — design only). Periodically
+  pulls top public kernels for the target competition (by votes and by public
+  LB), distills techniques into an attributed ideas_pool.md, maintains
+  citations.bib for every referenced kernel, and never copies code verbatim.
+  Throttled by last_recon_at to respect Kaggle CLI rate limits.
+triggers:
+  - "auto-kaggle-recon"
+  - "kaggle recon"
+inputs:
+  - name: comp_slug
+    description: Kaggle competition slug
+    required: true
+outputs:
+  - runs/<comp_slug>/stage1_recon/kernels_index.json
+  - runs/<comp_slug>/stage1_recon/ideas_pool.md
+  - runs/<comp_slug>/stage1_recon/citations.bib

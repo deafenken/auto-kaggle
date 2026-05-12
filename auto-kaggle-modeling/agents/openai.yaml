@@ -1,0 +1,22 @@
+name: auto-kaggle-modeling
+display_name: Auto-Kaggle Stage 2 — Modeling
+description: |
+  Stage 2 of auto-kaggle (NOT YET IMPLEMENTED — design only). Builds the
+  user's own CV-aware pipeline for the competition, with model templates
+  chosen by task type and compute environment (tabular LightGBM/CatBoost/
+  XGBoost; CV timm; NLP HF transformers). Integrates recon ideas one at a
+  time with ablations so we know which ideas pulled weight. Tracks CV vs
+  public-LB gap in leaderboard.csv. Refuses runs that exceed the user's
+  per-run wallclock budget.
+triggers:
+  - "auto-kaggle-modeling"
+  - "kaggle modeling"
+inputs:
+  - name: comp_slug
+    description: Kaggle competition slug
+    required: true
+outputs:
+  - runs/<comp_slug>/stage2_modeling/pipeline.py
+  - runs/<comp_slug>/stage2_modeling/cv_split.yaml
+  - runs/<comp_slug>/stage2_modeling/leaderboard.csv
+  - runs/<comp_slug>/stage2_modeling/runs/<run_id>/test_preds.csv

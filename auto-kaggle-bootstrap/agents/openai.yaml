@@ -1,0 +1,22 @@
+name: auto-kaggle-bootstrap
+display_name: Auto-Kaggle Stage 0 — Bootstrap
+description: |
+  Stage 0 of the auto-kaggle pipeline. Asks the user which compute environment
+  to use, downloads competition data via the Kaggle CLI, parses Overview/Rules/
+  Evaluation pages to extract task type, metric, daily quota, deadline, team
+  rules, and external data constraints, then writes comp_profile.yaml plus a
+  hand_off briefing for Stage 1. Refuses Knowledge / Tutorial competitions that
+  do not award medals. Idempotent — safe to re-invoke.
+triggers:
+  - "auto-kaggle-bootstrap"
+  - "bootstrap kaggle"
+inputs:
+  - name: comp_slug
+    description: Kaggle competition slug, e.g. titanic
+    required: true
+outputs:
+  - runs/<comp_slug>/stage0_bootstrap/comp_profile.yaml
+  - runs/<comp_slug>/stage0_bootstrap/rules_summary.md
+  - runs/<comp_slug>/stage0_bootstrap/data_stats.md
+  - runs/<comp_slug>/stage0_bootstrap/compute_env.yaml
+  - runs/<comp_slug>/stage0_bootstrap/hand_off.md

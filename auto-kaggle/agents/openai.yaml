@@ -1,0 +1,31 @@
+name: auto-kaggle
+display_name: Auto-Kaggle Orchestrator
+description: |
+  Fully-autonomous Kaggle medal-hunting pipeline. Given a competition URL,
+  asks for compute environment, downloads data, parses rules, periodically
+  scrapes top public kernels for ideas (with attribution), trains its own
+  CV-aware pipeline, tracks daily submission quota, and presents ranked
+  submission candidates for the user to pick. All state persists on disk
+  under runs/<comp_slug>/ so the run survives crashes and context resets.
+  Delegates to four sub-skills: auto-kaggle-bootstrap, auto-kaggle-recon,
+  auto-kaggle-modeling, auto-kaggle-submit. Pair with assets/supervisor.sh
+  for multi-day unattended operation.
+triggers:
+  - "刷 kaggle"
+  - "auto kaggle"
+  - "auto-kaggle"
+  - "kaggle medal"
+  - "继续刷"
+  - "resume kaggle"
+inputs:
+  - name: competition
+    description: Kaggle competition URL or slug
+    required: true
+  - name: tier
+    description: silver | silver-floor-gold-ceiling | gold
+    required: false
+    default: silver-floor-gold-ceiling
+outputs:
+  - runs/<comp_slug>/stage3_submit/recommendations.md
+  - runs/<comp_slug>/stage3_submit/submission_log.jsonl
+  - runs/<comp_slug>/.heartbeat

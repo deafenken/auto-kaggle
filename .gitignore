@@ -1,0 +1,36 @@
+# Local run artifacts — never commit experimental output
+runs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+
+# macOS / editor noise
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Local secrets (Kaggle credentials, etc.)
+.kaggle/
+kaggle.json
+.env
+.env.local
+
+# Large data formats accidentally written outside runs/
+*.csv.gz
+*.parquet
+*.npz
+*.pt
+*.ckpt
+*.safetensors
+
+# Supervisor logs
+supervisor.log
+*.pid
+STOP
+PAUSE

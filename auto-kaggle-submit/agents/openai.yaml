@@ -1,0 +1,24 @@
+name: auto-kaggle-submit
+display_name: Auto-Kaggle Stage 3 — Submit
+description: |
+  Stage 3 of auto-kaggle (NOT YET IMPLEMENTED — design only). Ranks submission
+  candidates by trust-adjusted CV (never raw public LB), prints real-time quota
+  status with next UTC reset, writes recommendations.md, waits for user pick,
+  then actually submits via the Kaggle CLI with mandatory attribution in the
+  message. Logs append-only to submission_log.jsonl and reconciles
+  quota_state.yaml against `kaggle competitions submissions`. When daily quota
+  is exhausted, writes wait_until.txt and exits so the supervisor can sleep.
+  Final 2 submissions before deadline are always user-gated.
+triggers:
+  - "auto-kaggle-submit"
+  - "kaggle submit"
+  - "kaggle quota"
+inputs:
+  - name: comp_slug
+    description: Kaggle competition slug
+    required: true
+outputs:
+  - runs/<comp_slug>/stage3_submit/recommendations.md
+  - runs/<comp_slug>/stage3_submit/submission_log.jsonl
+  - runs/<comp_slug>/stage3_submit/quota_state.yaml
+  - runs/<comp_slug>/stage3_submit/wait_until.txt
