@@ -1,0 +1,62 @@
+name: vision-timm-seg
+applies_to:
+  - image-segmentation
+  - image-instance-segmentation
+min_vram_gb: 12
+internet_required_at_train: true
+internet_required_at_infer: false
+
+base_hours_per_fold:
+  image-segmentation: 4.0
+  image-instance-segmentation: 5.0
+
+defaults:
+  # SMP (segmentation_models_pytorch) is the typical backbone wrapper for seg.
+  # The agent overrides encoder_name per competition.
+  framework: smp                                     # smp | mmseg | custom
+  architecture: Unet                                 # SMP names: Unet, UnetPlusPlus, FPN, DeepLabV3Plus, etc.
+  encoder_name: tu-convnext_base.fb_in22k_ft_in1k    # any timm via SMP's "tu-" prefix
+  encoder_weights: imagenet
+  image_size: 768
+  in_channels: 3
+  classes: 1                                         # 1 = binary mask; agent overrides
+  epochs: 30
+  batch_size: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  optimizer: adamw
+  scheduler: cosine
+  mixed_precision: true
+  num_workers: 4
+  loss:
+    type: bce_dice                                   # bce_dice | dice | focal | lovasz
+    bce_weight: 0.5
+    dice_weight: 0.5
+  augmentation:
+    policy: medium
+    horizontal_flip: 0.5
+    rotation_degrees: 20
+  tta:
+    enabled: true
+    flips: [horizontal, vertical]
+  feature_config:
+    image_root: data/raw/images/
+    mask_root: data/raw/masks/
+    target_col: mask_path
+    id_col: image_id
+  submission:
+    encoding: rle                                    # rle | png-paths
+    threshold: 0.5                                   # for binary; auto-tuned on OOF later
+
+deps_python:
+  - torch>=2.0
+  - segmentation-models-pytorch>=0.3
+  - timm>=0.9
+  - albumentations>=1.3
+  - pandas
+  - numpy
+  - pyyaml
+  - opencv-python-headless
+  - scikit-learn
+
+entry_point: train.py

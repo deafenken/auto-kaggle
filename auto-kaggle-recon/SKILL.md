@@ -164,11 +164,26 @@ For each external dataset referenced by a kernel (look at `metadata.json` from `
 
 Integrity rule 10: Stage 2 may use only datasets with `Approved for use: YES`. This stage **never** flips that flag — the user does.
 
-### Step 6 — finalize
+### Step 6 — optional: discussion mining
+
+If `run.yaml.recon_discussion.enabled: true`, run `assets/recon_discussion.py` after Step 5. This is opt-in because (a) it needs `WebFetch` and (b) signal-to-noise is comp-dependent.
+
+The script orchestrates a two-phase fetch (listing → high-vote thread bodies) using `WebFetch` handoff prompts written to `runs/<comp>/handoff_prompts/`. The agent runs the WebFetch calls, saves results to `.discussion_tmp/listings.json` and `stage1_recon/discussions/<thread_id>/post.md`, then re-invokes the script to finalize the index.
+
+Full protocol in `references/discussion-mining.md`. Key behaviors:
+
+- Throttled separately via `last_discussion_at` (independent cadence from kernel recon).
+- Categorizes threads as `leak | rule-clarification | technique | baseline | shake-up | other`.
+- High-signal `technique` threads get entries in `ideas_pool.md` with citations of the form `discussion:<thread_id>`.
+- `leak` / `rule-clarification` threads trigger soft escalations in the next `hand_off.md`.
+- If a discussion thread changes the comp rules, re-bootstrap (`auto-kaggle-bootstrap --re-bootstrap`) before continuing.
+
+### Step 7 — finalize
 
 1. Atomic-rewrite `kernels_index.json`.
 2. Atomic-rewrite `last_recon_at` with the current ISO-8601 UTC timestamp.
 3. Append `progress.jsonl` event `recon_pulled` with `{kernels_total, new, updated, dropped, ideas_total}`.
+3a. If discussion mining ran this cycle, also append to `progress.jsonl` event `discussion_pulled` with `{threads_total, new, updated, queued_full_fetch}`.
 4. Update `hand_off.md` per the contract:
 
 ```markdown
@@ -215,6 +230,7 @@ new ideas. Estimate wallclock before starting any run.
 | `references/kernel-distillation.md` | Step 4 — extracting techniques from a notebook |
 | `references/ideas-pool-format.md` | Step 4 — writing the entry, especially category tags + deduplication |
 | `references/throttle-and-rate.md` | Step 0 / step 1 — throttle window, rate limit handling |
+| `references/discussion-mining.md` | Step 6 — opt-in discussion scraping; categorization rules |
 | `auto-kaggle/references/state-contract.md` | Always |
 | `auto-kaggle/references/integrity-rules.md` | Step 5 — citations + external data (Rule 1, Rule 10) |
 | `auto-kaggle/references/kaggle-cli-basics.md` | Every `kaggle ...` call |

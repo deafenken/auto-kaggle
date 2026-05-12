@@ -11,8 +11,8 @@ Stage 2 ships templates under `assets/templates/`. The agent picks one based on 
 | `tabular-regression` | `tabular-lgbm` | Use `tabular-cat` for the same reason, or `tabular-xgb` if recon suggests heavy XGBoost usage in top kernels |
 | `tabular-ranking` | `tabular-lgbm` (rank objective) | LightGBM has native LambdaRank; CatBoost has YetiRank |
 | `image-classification` | `vision-timm` | Use a custom template if the comp ships a starter notebook with a non-standard backbone |
-| `image-segmentation` | `vision-mmseg` (planned — not yet shipped) | For now, write a custom train.py — see fallback below |
-| `image-detection` | custom | Use `mmdetection` or `ultralytics` in a custom train.py |
+| `image-segmentation` | `vision-timm-seg` | Skeleton built around `segmentation_models_pytorch`; agent implements mask loading + RLE encoding |
+| `image-detection` | `vision-det` | Skeleton supports `ultralytics` / `mmdet` / `torchvision`; agent picks one in `framework` config |
 | `nlp-classification` | `nlp-hf` | Default to `microsoft/deberta-v3-base` unless recon says otherwise |
 | `nlp-token-classification` | `nlp-hf` | Same, with token-classification head |
 | `nlp-regression` | `nlp-hf` | Use regression head; comps like Common Lit prompted this category |
@@ -93,11 +93,17 @@ A run with `template: tabular-lgbm` and `model: catboost` in `config.yaml` is a 
 
 Right now `auto-kaggle-modeling/assets/templates/` contains:
 
-- **`tabular-lgbm/`** — fully functional. `train.py` reads `config.yaml`, trains LightGBM with the configured CV scheme, writes everything the contract requires.
-- **`vision-timm/`** — skeleton. `train.py` has the outer training loop in place; the actual model construction, augmentation policy, and inference details need filling per competition (the agent does this in the run-dir copy, not in the template source).
-- **`nlp-hf/`** — skeleton. Same shape as vision-timm.
+Fully functional:
+- **`tabular-lgbm/`** — LightGBM with KFold / Stratified / Group split dispatch, target transforms, categorical handling, fold-by-fold atomic checkpoints.
+- **`ensemble/`** — blends (arithmetic / geometric / rank-mean) or stacks (Ridge / LGBM) prior runs' OOFs + test preds. Produces a run with the same contract as model runs; cheap (seconds for tabular, minutes for vision).
 
-More templates land in later commits.
+Skeletons (outer loop runs; agent customizes model / dataset / metric / submission encoding in the run-dir copy):
+- **`vision-timm/`** — image classification with timm backbones + albumentations.
+- **`vision-timm-seg/`** — segmentation with `segmentation_models_pytorch` + SMP losses (Dice / BCE / Focal / Lovasz).
+- **`vision-det/`** — detection with framework hook for `ultralytics` / `mmdet` / `torchvision`.
+- **`nlp-hf/`** — HuggingFace transformer fine-tuning with mixed precision + linear warmup.
+
+More templates land in later commits (planned: `tabular-cat`, `tabular-xgb`, `tabular-stack`).
 
 ## What the orchestrator records when picking a template
 

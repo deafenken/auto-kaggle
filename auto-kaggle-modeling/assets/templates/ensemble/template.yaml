@@ -1,0 +1,50 @@
+name: ensemble
+applies_to:
+  - tabular-binary
+  - tabular-multiclass
+  - tabular-regression
+  - tabular-ranking
+  - image-classification
+  - nlp-classification
+  - nlp-regression
+min_vram_gb: 0
+internet_required_at_train: false
+internet_required_at_infer: false
+
+# Wallclock is dominated by reading OOFs and (for stacking) a small meta-learner fit.
+# These numbers are per ensemble-run, not per fold.
+base_hours_per_fold:
+  tabular-binary: 0.05
+  tabular-multiclass: 0.05
+  tabular-regression: 0.05
+  tabular-ranking: 0.05
+  image-classification: 0.1
+  nlp-classification: 0.1
+  nlp-regression: 0.1
+
+defaults:
+  mode: blend                          # blend | stack
+  blend:
+    aggregation: arithmetic            # arithmetic | geometric | rank_mean
+    weights: null                      # null = uniform; otherwise list aligned with source_runs
+    clip_to_unit: false                # set true for probability outputs
+  stack:
+    meta_model: ridge                  # ridge | lgbm
+    ridge_alpha: 1.0
+    lgbm_params:
+      num_leaves: 7
+      learning_rate: 0.05
+      n_estimators: 500
+      min_data_in_leaf: 50
+      verbose: -1
+  source_runs: []                      # required: list of run_ids whose oof.npy + test_preds.csv to blend
+  geometric_eps: 1.0e-9
+
+deps_python:
+  - numpy
+  - pandas
+  - pyyaml
+  - scikit-learn
+  - lightgbm>=4.0           # only if mode=stack and meta_model=lgbm
+
+entry_point: train.py

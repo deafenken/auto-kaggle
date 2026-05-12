@@ -1,0 +1,65 @@
+name: vision-det
+applies_to:
+  - image-detection
+min_vram_gb: 16
+internet_required_at_train: true
+internet_required_at_infer: false
+
+base_hours_per_fold:
+  image-detection: 6.0
+
+defaults:
+  # The agent picks one framework per competition. ultralytics is fastest to set up;
+  # mmdetection is more configurable; torchvision is the fewest extra deps.
+  framework: ultralytics        # ultralytics | mmdet | torchvision
+  model_name: yolov8x           # ultralytics: yolov8n/s/m/l/x ; mmdet: config name
+  image_size: 1280
+  epochs: 30
+  batch_size: 8
+  lr: 1.0e-3
+  weight_decay: 5.0e-4
+  optimizer: adamw
+  warmup_epochs: 3
+  mixed_precision: true
+  num_workers: 4
+  loss:
+    box_gain: 7.5
+    cls_gain: 0.5
+    dfl_gain: 1.5
+  augmentation:
+    mosaic: 1.0
+    mixup: 0.15
+    hsv_h: 0.015
+    hsv_s: 0.7
+    hsv_v: 0.4
+  postprocess:
+    iou_threshold: 0.5
+    conf_threshold: 0.001       # low for max recall during scoring; comp may tune later
+    max_detections: 300
+  tta:
+    enabled: false              # detection TTA is expensive and brittle; off by default
+  feature_config:
+    image_root: data/raw/images/
+    annotations_path: data/raw/annotations.json
+    target_col: bbox
+    id_col: image_id
+
+deps_python_ultralytics:
+  - torch>=2.0
+  - ultralytics>=8.0
+  - pandas
+  - numpy
+  - pyyaml
+  - pillow
+  - opencv-python-headless
+
+deps_python_mmdet:
+  - torch>=2.0
+  - mmengine
+  - mmcv>=2.0
+  - mmdet>=3.0
+  - pandas
+  - numpy
+  - pyyaml
+
+entry_point: train.py
