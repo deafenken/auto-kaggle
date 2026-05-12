@@ -111,7 +111,7 @@ Compute env defaults if the user gives partial info: see `references/compute-env
 ### 2. Confirm the comp exists and pull metadata
 
 ```bash
-kaggle competitions view <slug> > stage0_bootstrap/raw_comp_view.json
+kaggle competitions view <slug> > stage0_bootstrap/raw_comp_view.txt
 ```
 
 If this returns non-zero, escalate (`escalation-policy.md` "Auth or comp does not exist"). Do not proceed.
