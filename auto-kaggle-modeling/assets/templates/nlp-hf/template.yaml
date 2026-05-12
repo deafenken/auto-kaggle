@@ -1,0 +1,44 @@
+name: nlp-hf
+applies_to:
+  - nlp-classification
+  - nlp-regression
+  - nlp-token-classification
+  - nlp-generation
+min_vram_gb: 12
+internet_required_at_train: true   # downloading model weights
+internet_required_at_infer: false
+
+base_hours_per_fold:
+  nlp-classification: 1.5
+  nlp-regression: 1.5
+  nlp-token-classification: 2.0
+  nlp-generation: 3.0
+
+defaults:
+  model_name: microsoft/deberta-v3-base
+  max_seq_length: 512
+  epochs: 3
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  lr: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  optimizer: adamw
+  scheduler: linear
+  mixed_precision: true
+  num_workers: 4
+  feature_config:
+    text_col: text
+    target_col: label
+    id_col: id
+
+deps_python:
+  - torch>=2.0
+  - transformers>=4.40
+  - datasets>=2.0
+  - pandas
+  - numpy
+  - pyyaml
+  - scikit-learn
+
+entry_point: train.py

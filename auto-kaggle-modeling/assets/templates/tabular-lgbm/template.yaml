@@ -1,0 +1,42 @@
+name: tabular-lgbm
+applies_to:
+  - tabular-binary
+  - tabular-multiclass
+  - tabular-regression
+  - tabular-ranking
+min_vram_gb: 0
+internet_required_at_train: false
+internet_required_at_infer: false
+
+base_hours_per_fold:
+  tabular-binary: 0.2
+  tabular-multiclass: 0.3
+  tabular-regression: 0.2
+  tabular-ranking: 0.4
+
+defaults:
+  model: lgbm
+  device: cpu                 # set to 'gpu' if compute_env has VRAM
+  n_estimators: 5000
+  early_stopping_rounds: 200
+  num_leaves: 63
+  learning_rate: 0.02
+  feature_fraction: 0.9
+  bagging_fraction: 0.85
+  bagging_freq: 5
+  min_data_in_leaf: 100
+  verbose: -1
+  feature_config:
+    drop_cols: []
+    target_col: target
+    id_col: id
+    target_transform: null    # null | log1p | boxcox
+
+deps_python:
+  - lightgbm>=4.0
+  - pandas
+  - numpy
+  - pyyaml
+  - scikit-learn
+
+entry_point: train.py
